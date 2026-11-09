@@ -1,0 +1,11 @@
+# Open_Cart
+# Name,    Type, SubType, Offset,   Size
+# Two OTA app slots for web firmware updates. ota_0 sits where the old factory app was, and nvs /
+# unloads keep their offsets, so settings and history survive the move to this table.
+nvs,       data, nvs,     0x9000,   0x6000
+phy_init,  data, phy,     0xf000,   0x1000
+ota_0,     app,  ota_0,   0x10000,  0x300000
+# Unload history (UNLOAD_LOG_CAPACITY records in a ring, about 4 NVS entries each)
+unloads,   data, nvs,     0x310000, 0x40000
+otadata,   data, ota,     0x350000, 0x2000
+ota_1,     app,  ota_1,   0x360000, 0x300000

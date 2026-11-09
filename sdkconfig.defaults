@@ -1,0 +1,20 @@
+# Open_Cart
+# Console and flashing over the DevKitC-1 "UART" USB port (UART0, GPIO43/44), the ESP-IDF default.
+# The "USB" port (native USB on GPIO19/20) is left free; add CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# to use it for the console instead.
+
+# Larger main task stack for the web server and stack init
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# AgIsoStack++ needs bigger pthread stacks (from its ESP32 tutorial)
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=8192
+CONFIG_FREERTOS_HZ=250
+
+# 16 MB flash (N16R8) so both OTA slots in partitions.csv fit
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# Roll back to the previous firmware if a new one crashes before app_main marks it valid
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Web server needs a few more URI handlers than the default
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
