@@ -16,7 +16,7 @@ def find_gh():
     if found:
         return found
     pkgs = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Packages")
-    for base in (pkgs, os.environ.get("ProgramFiles", "") + "\GitHub CLI"):
+    for base in (pkgs, os.path.join(os.environ.get("ProgramFiles", ""), "GitHub CLI")):
         for dirpath, _, files in os.walk(base):
             if "gh.exe" in files:
                 return os.path.join(dirpath, "gh.exe")
