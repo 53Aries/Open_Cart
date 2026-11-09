@@ -34,7 +34,7 @@ pio device monitor
 
 Every `pio run` bumps the version in `version.txt` (1.3 -> 1.4 ...), shows it on the web page as
 "Running version", and writes the Wi-Fi update image as `.pio/build/<env>/open_cart_v<version>.bin`
-(see `scripts/version.py`). Upload that file from the page's Firmware update box. Commit `version.txt`
+(see `scripts/version.py`). Upload that file from the page's Firmware update box. The minor number counts up forever (1.9, 1.10, ...). To start v2, put `2.0+` in `version.txt` before building; that build is exactly 2.0 and the count continues from there. Commit `version.txt`
 along with your changes so the next build continues from the right number.
 
 To publish a build: `pio run -e s3`, test it, then `python scripts/release.py`. It commits `version.txt`,
