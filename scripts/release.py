@@ -2,11 +2,25 @@
 # Usage: pio run -e s3   then   python scripts/release.py [env]
 # Commits version.txt, pushes, and creates release v<version> with open_cart_v<version>.bin attached.
 import os
+import shutil
 import subprocess
 import sys
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 env = sys.argv[1] if len(sys.argv) > 1 else "s3"
+
+
+def find_gh():
+    # A terminal opened before `winget install GitHub.cli` may not have gh on PATH yet.
+    found = shutil.which("gh")
+    if found:
+        return found
+    pkgs = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Packages")
+    for base in (pkgs, os.environ.get("ProgramFiles", "") + "\GitHub CLI"):
+        for dirpath, _, files in os.walk(base):
+            if "gh.exe" in files:
+                return os.path.join(dirpath, "gh.exe")
+    sys.exit("GitHub CLI not found. Install it with `winget install GitHub.cli`, then run `gh auth login`.")
 
 
 def run(*args, capture=False):
@@ -34,5 +48,5 @@ run("git", "add", "version.txt")
 if run("git", "status", "--porcelain", "version.txt", capture=True):
     run("git", "commit", "-m", "Release %s\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" % tag)
 run("git", "push", "origin", "HEAD")
-run("gh", "release", "create", tag, image, "--title", tag, "--generate-notes", "--target", run("git", "rev-parse", "HEAD", capture=True))
+run(find_gh(), "release", "create", tag, image, "--title", tag, "--generate-notes", "--target", run("git", "rev-parse", "HEAD", capture=True))
 print("Released %s" % tag)
