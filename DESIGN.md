@@ -1,14 +1,17 @@
-# Open_Cart: Design Notes (draft v0.1)
+# Open_Cart: Design Notes
 
 ESP32-S3 + ADS1220 reading a 5-cell grain cart scale (Digi-Star 3.5 DB-30 EZ Mate cells,
 31,000 lb each, 1.550 mV/V) through the passive junction box. Outputs, each switchable
 at runtime:
 
 1. Wi-Fi access point + web page (weight, tare, calibration, settings)
-2. Serial scoreboard output (Agri-Tronix 2906-0409; line settings known, string layout TBD, see "Scoreboard")
+2. Serial scoreboard output (Agri-Tronix 2906-0409; firmware sends the Digi-Star EZ2000 frame, digit mapping unverified, see "Scoreboard")
 3. ISOBUS Virtual Terminal client over CAN (AgIsoStack++)
 
-Everything below is a proposal. Nothing has been built or tested on hardware.
+The hardware sections below are still a design proposal (no PCB has been built from them). The firmware is built
+and runs on a bare ESP32-S3 DevKit (no ADS1220, load cell or scoreboard attached). Only the Wi-Fi web page and the
+Wi-Fi firmware update have been tried there; nothing involving the ADC, load cells, scoreboard or CAN has been
+tested on hardware (see "Firmware" and README.md). Version, build and release workflow: CLAUDE.md.
 
 ## Block diagram
 
@@ -39,7 +42,7 @@ ADS1220 --SPI + DRDY--> ESP32-S3 --UART--> RS232 (or RS485) xcvr --> scoreboard
 | Protection | ESD/TVS on load cell, scoreboard and CAN lines | Cables run outside the enclosure |
 | Input filter | AIN0/AIN1: RF1 = RF2 = 1 kohm 1 % (0603; use 470 ohm if offset drift is a problem). **CDIF = 100 nF C0G/NP0** (50 V, 1206) across AIN0-AIN1. CCM1 = CCM2 = 10 nF C0G (0603) from each input to AGND | **CDIF must be C0G/NP0, not X7R** (datasheet 9.4.1: X7R has voltage-coefficient and microphonic error that matters at gain 128). Keep CDIF >= 10x CCM. Corners: differential about 760 Hz, common-mode about 16 kHz. REFP0/REFN0: no parts, leave floating (VREF = AVDD). 100 nF at AVDD. Leave AIN3/REFN1 floating. Tune later; gain 128 is sensitive to layout |
 
-## Pin map (proposal, ESP32-S3)
+## Pin map (as in src/config.h, ESP32-S3)
 
 Avoided on the S3: strapping GPIO3/45/46 (GPIO0 is used only as the BOOT/recovery button), flash/PSRAM
 GPIO26-37 (octal PSRAM variants), native USB GPIO19/20 and UART0 console GPIO43/44. The ADS1220 uses GPIO10-13 on
@@ -61,6 +64,7 @@ traces don't cross.
 | TWAI (CAN) TX | 5 |
 | TWAI (CAN) RX | 6 |
 | Recovery input (BOOT button, forces Wi-Fi page on) | 0 (strapping pin, used only as a pulled-up button) |
+| Status LED (DevKit's onboard WS2812; v1.1 boards use GPIO38) | 48 |
 | Console / flashing (DevKitC-1 UART port, UART0) | 43 / 44 |
 
 ## Power rails
@@ -122,7 +126,8 @@ traces don't cross.
   and `read()` subtracts it. This removes the ADC offset (typ +/-4 uV, about 80 lb) but not the load cell
   zero, so tare still applies. Offset drift is 0.08-0.3 uV/degC (about 2-6 lb per degC); call
   `calibrate_offset()` again if you want to re-zero the ADC. Any calibration saved before this change would be
-  off by the board offset (none exist yet). Builds clean for the `s3` env; not yet tested on hardware.
+  off by the board offset (none exist yet). Builds clean for the `s3` env, but has never run with an ADS1220 attached. The register setup also enables 50/60 Hz rejection (reg 2 = D0h). If the
+  register readback does not match, init fails and the status LED goes solid red (see "Firmware").
 
 ## Scoreboard (Agri-Tronix 2906-0409, 4" LED)
 
@@ -274,6 +279,60 @@ bridge current (~70 mA for five 350 ohm cells in parallel, ~70 ohm). The cell pi
 - Optional, only if drift matters in testing: measure excitation current with a small shunt in the EXC- return and
   compute R_loop = V_box / I - R_bridge to correct for cable temperature. Needs a known, stable R_bridge.
 - Do not raise the excitation voltage to compensate: the ADC references the same 5 V, so it gains nothing.
+
+## Firmware
+
+Behaviour as implemented in `src/` (the hardware sections above describe the board; this describes what runs on it).
+
+**Tasks.** `sample_task` polls DRDY every 4 ms tick and feeds each ADS1220 sample (20 SPS) into the filter; `unload_task` feeds the unload
+detector at 10 Hz; `led_task` drives the status LED; the web server, scoreboard and ISOBUS tasks run only if enabled.
+`app_main` marks the new firmware valid once everything is up (rollback is enabled, see below).
+
+**Scale logic (`scale.cpp`).** Trimmed mean over a 1-64 sample window (default 20, about 1 s), piecewise-linear
+calibration from up to 8 points (raw counts to pounds), tare, a zero function that shifts the calibration zero and
+clears the tare, display rounding (default 10 lb) and a motion flag (spread in the window above 15 lb by default).
+Without a calibration it uses a nominal slope worked out from the load cell settings (cell count, capacity,
+mV/V, 5 V excitation) and the reading is marked approximate. Load cell layout is its own NVS blob so changing other
+settings never wipes calibration.
+
+**Unload detection (`unload.cpp`, `unload_log.cpp`).** Weight is sampled at 10 Hz. An unload starts when the weight
+drops 100 lb (default) below the highest weight of the last ~10 s, and ends after 5 s (default) without a further
+drop, or if the weight rises again; unloads under 250 lb are not logged. Each unload is stored with start, end,
+total, time and the current field name in a ring of 1500 records in the `unloads` NVS partition. The scale has no RTC,
+so the web page sends its clock. When the ring is full the page makes the user choose before the oldest records are
+overwritten. Fields (up to 50 saved names) keep a running total; history exports as CSV. All thresholds are on the page.
+
+**Status LED.** Red solid: ADC failed to start. Red blinking: no new sample for 2 s. Orange: filter still filling.
+Cyan: running but uncalibrated or approximate. Green: calibrated. Green or cyan blinks off while the cart is in motion.
+
+**Wi-Fi web page (`web_server.cpp`).** Access point `Open_Cart-xxxx`, WPA2, default password in `config.h`
+(change it), channel 6, up to 4 clients, full TX power, power save off. Page at http://192.168.4.1/ or
+http://opencart.local/ (mDNS). Tabs: Home (weight, tare, zero), Unloads, Fields, Settings (calibration, certified
+scale comparison, load cells, outputs, AP name and password, firmware update, unload detection). It can be turned off
+in settings; holding the BOOT button (GPIO0) while powering up forces it on for that boot.
+
+**Scoreboard (`scoreboard.cpp`).** Off by default. UART1 at 1200 baud 7E1 (settings), one frame every 250 ms:
+`<stx>` + six characters + `<cr>`, the EZ2000 layout. The weight is sent right-justified in the six characters, a
+leading `-` marks a negative weight, and the last character becomes `-` while in motion. The tare flag is never
+sent. This mapping is an assumption: see "Scoreboard" for what is unconfirmed. UART2 is opened and left idle.
+RS-485 mode (DE on GPIO8) exists in firmware but is not part of the board design.
+
+**ISOBUS (`isobus_vt.cpp`).** Separate build (`pio run -e s3_isobus`), off by default, TWAI at 250 kbit/s accepting all
+frames, AgIsoStack++ VT client with five tabs. Built but never run against a VT or the S3 TWAI plugin.
+
+**Flash layout (`partitions.csv`, 16 MB).** nvs 24 KB, phy_init, `ota_0` and `ota_1` 3 MB each, `unloads` 256 KB
+(NVS), otadata. Two app slots let the Wi-Fi page install firmware; `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` returns to
+the previous slot if a new image crashes before `app_main` finishes. Settings and history survive updates.
+
+**Wi-Fi firmware update.** The Settings tab uploads an app image (`firmware.bin`, never `firmware.factory.bin`) renamed
+`open_cart_v<version>.bin`. The server checks the file name, that the size fits a slot, the image magic, that the app
+description carries this project's name (`Open_Cart`), and the image hash, writes the other slot, switches the boot
+partition and restarts. Renaming the project in `CMakeLists.txt` therefore means one USB flash before Wi-Fi updates
+work again. The restart runs in its own 4 KB task (2 KB was too small and the scale never rebooted).
+
+**Versioning and releases.** `version.txt` is bumped on every build by `scripts/version.py` and shown on the page as
+"Running version" (the build date inside the image is not reliable). Releases are GitHub Releases made with
+`scripts/release.py`; binaries are not committed. Details in CLAUDE.md.
 
 ## Things to confirm on the real hardware before committing
 

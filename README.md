@@ -18,11 +18,12 @@ See `DESIGN.md` for the hardware (parts, power, pins, signal budget, bring-up or
 | `unload.cpp` (unload detector) | Behaviour checked with a Python port of the algorithm only. `test/test_unload.cpp` exists but has **not been run** (no host C++ compiler here) |
 | Web helpers (form parsing, JSON escaping), old placeholder scoreboard frame (since replaced, not re-tested) | Tested on a host with stand-in ESP headers |
 | All other files | Syntax-checked on a host against stand-in ESP headers only |
-| ESP-IDF build, ADS1220 driver, Wi-Fi, web page in a browser, UART, CAN | **Not built or run on real hardware or the real SDK** |
+| ESP-IDF build (`s3`), Wi-Fi access point, web page, Wi-Fi firmware update | Builds, and runs on a **bare ESP32-S3 DevKit** (no ADS1220 or load cells attached). Tried through the web page only |
+| ADS1220 driver, readings, calibration, status LED colours, scoreboard UART, CAN | **Not tested on hardware** |
 | Digi-Star scoreboard protocol | **Unknown.** Waiting on Digi-Star |
 | ISOBUS VT | **Built, untested.** Five tabs (Home, Unloads, Fields, Calibrate, Setup); needs a VT simulator / real display, see `isobus/README.md` |
 
-Expect to fix compile errors and register-level issues on first build.
+Expect register-level and wiring issues the first time the ADS1220 and load cells are connected.
 
 ## Build and flash
 
