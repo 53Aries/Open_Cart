@@ -69,6 +69,32 @@ int main() {
     t.clear_tare();
     CHECK(t.tare_lb() == 0.0);
 
+    // Zero: empty cart drifts +300 lb; ZERO removes the offset and keeps the span
+    {
+        double keep = g_offset;
+        g_offset += 300.0 * g_cpl;
+        feed(t, 0.0, 25);
+        CHECK(std::fabs(t.gross_lb() - 300.0) < 10.0);
+        t.set_tare_lb(50.0);
+        CHECK(t.zero());
+        CHECK(t.tare_lb() == 0.0);
+        CHECK(t.cal_count() == 2);
+        CHECK(std::fabs(t.gross_lb()) < 10.0);
+        feed(t, 30000.0, 25);
+        CHECK(std::fabs(t.gross_lb() - 30000.0) < 15.0);
+        g_offset = keep;
+        // No calibration: zero adds a 0 lb point; not ready: refused
+        Scale z;
+        z.configure(20, 10.0, 15.0);
+        feed(z, 0.0, 5);
+        CHECK(!z.zero());
+        feed(z, 0.0, 20);
+        CHECK(z.zero() && z.is_approximate());
+        feed(t, 0.0, 25);
+        CHECK(t.zero());   // re-zero with the offset back to normal
+        feed(t, 28000.0, 25);   // restore the state the next test expects
+    }
+
     // Re-calibrating a point replaces it instead of adding a duplicate
     CHECK(t.add_cal_point(30000.0));
     CHECK(t.cal_count() == 2);

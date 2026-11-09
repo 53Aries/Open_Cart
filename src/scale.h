@@ -53,6 +53,10 @@ public:
     // Tare
     void tare();                    // tare to current gross
     void clear_tare();
+    // Zero: make the current reading 0 lb gross by shifting the calibration's zero offset (the span
+    // is kept), and clear the tare. For correcting drift or buildup on an empty cart. Unlike tare it
+    // changes the saved calibration. With no calibration it adds a 0 lb point. False if not ready.
+    bool zero();
     double tare_lb() const { return tare_lb_; }
     void set_tare_lb(double v) { tare_lb_ = v; }
 

@@ -200,6 +200,10 @@ struct State {
     TickType_t del_armed_at = 0;
     std::string f_msg;
 
+    // Home tab: ZERO key needs a second press
+    bool zero_armed = false;
+    TickType_t zero_armed_at = 0;
+
     // Calibrate tab
     double known_lb = 0;
     double cart_lb = 0;
@@ -219,7 +223,7 @@ void ui_message_reset() {
     g.f_msg.clear();
     g.c_msg.clear();
     g.s_msg.clear();
-    g.roll_armed = g.del_armed = g.clr_armed = false;
+    g.roll_armed = g.del_armed = g.clr_armed = g.zero_armed = false;
 }
 
 void goto_tab(Tab t) {
@@ -337,6 +341,19 @@ void handle_key(std::uint16_t id) {
     const TickType_t now = xTaskGetTickCount();
     if (id == vtid::K_TARE) { do_tare(false); return; }
     if (id == vtid::K_UNTARE) { do_tare(true); return; }
+    if (id == vtid::K_ZERO) {
+        // Changes the saved calibration zero, so (like Delete) it needs a second press.
+        if (g.zero_armed && now - g.zero_armed_at < kArmTimeout) {
+            bool ok;
+            { AppLock l; ok = g_app.scale.zero(); }
+            if (ok) app_persist_scale();
+            g.zero_armed = false;
+        } else {
+            g.zero_armed = true;
+            g.zero_armed_at = now;
+        }
+        return;
+    }
     if (id == vtid::K_UNLOAD) { app_toggle_unload(); return; }
 
     if (g.tab == TAB_UNL) {
@@ -475,6 +492,8 @@ void show_home(const Snapshot& s) {
     std::string w;
     if (need) w = "Unload history is FULL. Open the Unloads tab to roll over, or download it on the web page.";
     else if (hc >= UNLOAD_LOG_CAPACITY * 9 / 10) w = "Unload history is nearly full (" + std::to_string(hc) + " of " + std::to_string(UNLOAD_LOG_CAPACITY) + ").";
+    if (g.zero_armed && xTaskGetTickCount() - g.zero_armed_at >= kArmTimeout) g.zero_armed = false;
+    if (g.zero_armed) w = "Cart empty? Press ZERO again to zero the scale.";
     g_out.set_str(vtid::H_WARN, w, 120);
 }
 

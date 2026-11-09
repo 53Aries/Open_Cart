@@ -78,6 +78,7 @@ th:first-child,td:first-child{text-align:left}
 <div class="card">
 <button onclick="post('/api/tare')">Tare</button>
 <button class="g" onclick="post('/api/untare')">Clear tare</button>
+<button class="r" onclick="zerosc()">ZERO</button>
 <div><small id="tareinfo"></small></div>
 </div>
 <div class="card">
@@ -184,6 +185,8 @@ async function post(u,b){let j=null;try{const r=await fetch(u,{method:'POST',hea
 async function cmpcal(){const c=$('cw').value,x=$('xw').value;if(c===''||x==='')return alert('Enter both weights');
  const j=await post('/api/cal/compare','cart='+encodeURIComponent(c)+'&cert='+encodeURIComponent(x));
  if(j&&!j.ok)alert(j.error||'could not apply');else{$('cw').value='';$('xw').value='';}}
+async function zerosc(){if(!confirm('Zero the scale? Only do this with the cart EMPTY. This shifts the saved calibration zero and clears the tare.'))return;
+ const j=await post('/api/zero');if(j&&!j.ok)alert(j.error||'could not zero');}
 async function addcal(){const j=await post('/api/cal/add','lb='+encodeURIComponent($('kw').value));if(j&&!j.ok)alert(j.error||'could not add point');}
 async function tick(){
  try{
@@ -419,6 +422,14 @@ static esp_err_t h_cal_get(httpd_req_t* req) {
 
 static esp_err_t h_tare(httpd_req_t* req) {
     { AppLock l; g_app.scale.tare(); }
+    app_persist_scale();
+    return send_json(req, "{\"ok\":true}");
+}
+
+static esp_err_t h_zero(httpd_req_t* req) {
+    bool ok;
+    { AppLock l; ok = g_app.scale.zero(); }
+    if (!ok) return send_json(req, "{\"ok\":false,\"error\":\"scale is still warming up\"}");
     app_persist_scale();
     return send_json(req, "{\"ok\":true}");
 }
@@ -859,6 +870,7 @@ void web_server_start() {
         {"/api/cal", HTTP_GET, h_cal_get, nullptr},
         {"/api/tare", HTTP_POST, h_tare, nullptr},
         {"/api/untare", HTTP_POST, h_untare, nullptr},
+        {"/api/zero", HTTP_POST, h_zero, nullptr},
         {"/api/cal/add", HTTP_POST, h_cal_add, nullptr},
         {"/api/cal/compare", HTTP_POST, h_cal_compare, nullptr},
         {"/api/cal/clear", HTTP_POST, h_cal_clear, nullptr},

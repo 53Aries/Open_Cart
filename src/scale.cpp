@@ -105,6 +105,22 @@ bool Scale::in_motion() const {
 void Scale::tare() { tare_lb_ = gross_lb(); }
 void Scale::clear_tare() { tare_lb_ = 0.0; }
 
+bool Scale::zero() {
+    if (!ready()) return false;
+    double raw = filtered_raw();
+    if (n_cal_ == 0) {
+        // No calibration yet: the empty scale becomes the zero point (nominal slope).
+        if (!add_cal_point_raw(raw, 0.0)) return false;
+    } else {
+        // Slide the whole calibration along the raw axis so the current reading is 0 lb.
+        // Slopes (and so the span) are untouched; only the empty-scale offset moves.
+        double delta = raw - lb_to_raw(0.0);
+        for (size_t i = 0; i < n_cal_; ++i) cal_[i].raw += delta;
+    }
+    tare_lb_ = 0.0;
+    return true;
+}
+
 double Scale::lb_to_raw(double lb) const {
     if (n_cal_ == 0) return 0.0;
     if (n_cal_ == 1) return cal_[0].raw + (lb - cal_[0].lb) * nominal_counts_per_lb_;

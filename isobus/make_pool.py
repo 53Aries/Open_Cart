@@ -122,7 +122,7 @@ for code, (nm, label) in enumerate([
         ("K_NEWER", "Newer"), ("K_OLDER", "Older"), ("K_ROLL", "Roll over"),
         ("K_UP", "Up"), ("K_DOWN", "Down"), ("K_USE", "Use"), ("K_DELETE", "Delete"),
         ("K_SETPT", "Set point"), ("K_CLRCAL", "Clear cal"), ("K_CMPCAL", "Apply cmp"),
-        ("K_PREVTAB", "Prev tab"), ("K_NEXTTAB", "Next tab")], start=1):
+        ("K_PREVTAB", "Prev tab"), ("K_NEXTTAB", "Next tab"), ("K_ZERO", "ZERO")], start=1):
     KEYS[nm] = key(nm, code, label)
 
 # ------------------------------------------------------------------- masks ----
@@ -227,7 +227,7 @@ st.append(label("Wi-Fi, outputs and firmware update: use the web page.", 10, CON
 
 NAV = ["K_PREVTAB", "K_NEXTTAB"]
 masks = [
-    ("HOME", home, ["K_TARE", "K_UNTARE", "K_UNLOAD"] + NAV),
+    ("HOME", home, ["K_TARE", "K_UNTARE", "K_ZERO", "K_UNLOAD"] + NAV),
     ("UNL", unl, ["K_NEWER", "K_OLDER", "K_ROLL"] + NAV),
     ("FLD", fld, ["K_UP", "K_DOWN", "K_USE", "K_DELETE"] + NAV),
     ("CAL", cal, ["K_SETPT", "K_CMPCAL", "K_CLRCAL", "K_TARE"] + NAV),   # max 6 keys: Clear tare lives on Home
