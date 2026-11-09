@@ -34,8 +34,12 @@ pio device monitor
 
 Every `pio run` bumps the version in `version.txt` (1.3 -> 1.4 ...), shows it on the web page as
 "Running version", and writes the Wi-Fi update image as `.pio/build/<env>/open_cart_v<version>.bin`
-(see `scripts/version.py`). A copy of the newest image is kept in `firmware/` (older ones are deleted) so it can be committed. Upload that file from the page's Firmware update box. Commit `version.txt`
+(see `scripts/version.py`). Upload that file from the page's Firmware update box. Commit `version.txt`
 along with your changes so the next build continues from the right number.
+
+To publish a build: `pio run -e s3`, test it, then `python scripts/release.py`. It commits `version.txt`,
+pushes, and creates a GitHub Release `v<version>` with the update image attached (needs the GitHub CLI:
+`winget install GitHub.cli`, then `gh auth login` once).
 
 ISOBUS build: `pio run -e s3_isobus` (see `isobus/README.md`).
 

@@ -24,13 +24,6 @@ def name_image(source, target, env):  # noqa: ARG001
         dst = os.path.join(os.path.dirname(bin_path), "open_cart_v%s.bin" % version)
         shutil.copyfile(bin_path, dst)
         print("Wi-Fi update image: %s" % dst)
-        # Also keep the newest image in firmware/ (tracked by git); older ones are removed to keep the repo small.
-        out = os.path.join(root, "firmware")
-        os.makedirs(out, exist_ok=True)
-        for old in os.listdir(out):
-            if old.startswith("open_cart_v") and old.endswith(".bin"):
-                os.remove(os.path.join(out, old))
-        shutil.copyfile(bin_path, os.path.join(out, os.path.basename(dst)))
 
 
 env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", name_image)  # noqa: F821
