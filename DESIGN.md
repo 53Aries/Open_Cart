@@ -21,7 +21,7 @@ tested on hardware (see "Firmware" and README.md). Version, build and release wo
 
 Scoreboard display: its own separate, separately fused 12 V rail (J905 pin 5), not part of the tree above. Its ground is tied to this board's ground (needed for the RS-232 data signal).
 
-Junction box (5 cells in parallel) --EXC+/EXC-/SIG+/SIG---> RC filter ---> ADS1220 (AIN0/AIN1, gain 128, ratiometric)
+Junction box (5 cells in parallel) --EXC+/EXC-/SIG+/SIG---> RC filter ---> ADS1220 (AIN1/AIN2, gain 128, ratiometric)
 ADS1220 --SPI + DRDY--> ESP32-S3 --UART--> RS232 (or RS485) xcvr --> scoreboard
                                   --TWAI--> CAN xcvr (TCAN1042HV) --> ISOBUS
                                   --Wi-Fi AP--> iPad / phone browser
@@ -40,29 +40,29 @@ ADS1220 --SPI + DRDY--> ESP32-S3 --UART--> RS232 (or RS485) xcvr --> scoreboard
 | CAN | **TI TCAN1042HVDR** (SOIC-8, 2 Mbps CAN FD, "H" = **+/-70 V bus fault protection**, "V" = VIO level shifting). VCC 4.5-5.5 V from the 5 V rail, **VIO (pin 5) 3.0-5.5 V from the DevKit's 3V3**, 0.1 uF at each, 4.7 uF bulk near VCC. Pin 8 = STB with an **internal pull-up: a floating STB puts the chip in standby, so tie STB to GND (about 10 kohm)**. Not the HGV (5 Mbps not needed at 250 kbit/s). Replaces the TCAN332 (see CAN notes for why) | Absolute max on CANH/CANL is +/-70 V, receiver common-mode +/-30 V, 16 kV HBM, 15 kV IEC unpowered / 8 kV powered, 4 kV EFT; TXD dominant timeout; bus is high impedance when unpowered. Dominant supply current up to 70 mA (80 mA high load; 180 mA max in a bus-fault test), on the 5 V rail. TI marks the plain TCAN1042HD tube obsolete, use the HVDR tape-and-reel. No termination unless this node is at the end of the bus (see below). Still add a CAN TVS (see CAN notes). Datasheet SLLES7D |
 | RS232 | MAX3232EIDR (TI, SOIC-16, -40 to 85 C, ESD-protected) or MAX3232EE (ADI) / SP3232E | 0.1 uF charge-pump caps at 3.3 V, **1 uF VCC bypass**, 100 kohm pull-ups on DIN1/DIN2, series resistor plus clamp on DOUT1/DOUT2 (see "Scoreboard"). Swap for MAX3485/SP3485 if the scoreboard is RS485. Signal levels on the J905 are **not confirmed** (see "Scoreboard") |
 | Protection | ESD/TVS on load cell, scoreboard and CAN lines | Cables run outside the enclosure |
-| Input filter | AIN0/AIN1: RF1 = RF2 = 1 kohm 1 % (0603; use 470 ohm if offset drift is a problem). **CDIF = 100 nF C0G/NP0** (50 V, 1206) across AIN0-AIN1. CCM1 = CCM2 = 10 nF C0G (0603) from each input to AGND | **CDIF must be C0G/NP0, not X7R** (datasheet 9.4.1: X7R has voltage-coefficient and microphonic error that matters at gain 128). Keep CDIF >= 10x CCM. Corners: differential about 760 Hz, common-mode about 16 kHz. REFP0/REFN0: no parts, leave floating (VREF = AVDD). 100 nF at AVDD. Leave AIN3/REFN1 floating. Tune later; gain 128 is sensitive to layout |
+| Input filter | AIN1/AIN2: RF1 = RF2 = 1 kohm 1 % (0603; use 470 ohm if offset drift is a problem). **CDIF = 100 nF C0G/NP0** (50 V, 1206) across AIN1-AIN2. CCM1 = CCM2 = 10 nF C0G (0603) from each input to AGND | **CDIF must be C0G/NP0, not X7R** (datasheet 9.4.1: X7R has voltage-coefficient and microphonic error that matters at gain 128). Keep CDIF >= 10x CCM. Corners: differential about 760 Hz, common-mode about 16 kHz. REFP0/REFN0: no parts, leave floating (VREF = AVDD). 100 nF at AVDD. Leave AIN3/REFN1 floating. Tune later; gain 128 is sensitive to layout |
 
 ## Pin map (as in src/config.h, ESP32-S3)
 
 Avoided on the S3: strapping GPIO3/45/46 (GPIO0 is used only as the BOOT/recovery button), flash/PSRAM
-GPIO26-37 (octal PSRAM variants), native USB GPIO19/20 and UART0 console GPIO43/44. The ADS1220 uses GPIO10-13 on
+GPIO26-37 (octal PSRAM variants), native USB GPIO19/20 and UART0 console GPIO43/44. The ADS1220 uses GPIO10-12 and 15-16 on
 SPI2, with SCLK and MOSI swapped from the IOMUX defaults (routed via the GPIO matrix, fine at 1 MHz) so the PCB
 traces don't cross.
 
 | Function | GPIO |
 |---|---|
-| ADS1220 DRDY | 14 |
-| ADS1220 DOUT/MISO | 13 |
+| ADS1220 DRDY | 15 |
+| ADS1220 DOUT/MISO | 16 |
 | ADS1220 SCLK | 11 |
 | ADS1220 DIN/MOSI | 12 |
 | ADS1220 CS | 10 |
-| Scoreboard UART TX | 16 |
-| Scoreboard UART RX | 15 |
-| Scoreboard UART2 TX (MAX3232 DIN2, J905 pin 4) | 17 |
-| Scoreboard UART2 RX (MAX3232 ROUT2, J905 pin 7) | 18 |
+| Scoreboard UART TX | 5 |
+| Scoreboard UART RX | 4 |
+| Scoreboard UART2 TX (MAX3232 DIN2, J905 pin 4) | 6 |
+| Scoreboard UART2 RX (MAX3232 ROUT2, J905 pin 7) | 7 |
 | RS485 DE/RE (only if RS485) | 8 |
-| TWAI (CAN) TX | 5 |
-| TWAI (CAN) RX | 6 |
+| TWAI (CAN) TX | 14 |
+| TWAI (CAN) RX | 13 |
 | Recovery input (BOOT button, forces Wi-Fi page on) | 0 (strapping pin, used only as a pulled-up button) |
 | Status LED (DevKit's onboard WS2812; v1.1 boards use GPIO38) | 48 |
 | Console / flashing (DevKitC-1 UART port, UART0) | 43 / 44 |
@@ -103,7 +103,7 @@ traces don't cross.
 
 ## ADS1220 breakout
 
-- Signal pair on AIN0/AIN1; AVDD = 5 V excitation rail (the reference), DVDD = 3.3 V. REFP0/REFN0 unused.
+- Signal pair on AIN1 (positive) / AIN2 (negative), MUX = 0011b; AIN0 and AIN3 unused and floating; AVDD = 5 V excitation rail (the reference), DVDD = 3.3 V. REFP0/REFN0 unused.
 - The board ties AVDD and DVDD together with a resistor. **Remove it**, then confirm AVDD-DVDD reads open
   with the board unpowered. Otherwise 5 V reaches the ESP32's 3.3 V I/O. Check AGND-DGND are tied, and that
   CLK is grounded (internal oscillator).
@@ -141,17 +141,17 @@ this table, from a secondary source, listed pin 1 as +5 VDC and pin 8 as a secon
 | Pin | Signal | Wiring on our board |
 |---|---|---|
 | 1 | 20 mA current loop (+) | **No connection.** The display is RS-232, so the loop is not used. Never put 5 V on this pin |
-| 2 | Com #1 Out (Tx), DDL & computer | **Our scoreboard data output.** MAX3232 DOUT1 (pin 14), fed by GPIO16 |
-| 3 | Com #1 In (Rx), DDL & computer | MAX3232 RIN1 (pin 13), to GPIO15 via ROUT1 (pin 12). Receive-only, safe to wire |
-| 4 | Com #1 Out (Tx), printer | MAX3232 DOUT2 (pin 7), fed by GPIO17 via DIN2 (pin 10). Idle (mark level) unless firmware sends on it |
+| 2 | Com #1 Out (Tx), DDL & computer | **Our scoreboard data output.** MAX3232 DOUT1 (pin 14), fed by GPIO5 |
+| 3 | Com #1 In (Rx), DDL & computer | MAX3232 RIN1 (pin 13), to GPIO4 via ROUT1 (pin 12). Receive-only, safe to wire |
+| 4 | Com #1 Out (Tx), printer | MAX3232 DOUT2 (pin 7), fed by GPIO6 via DIN2 (pin 10). Idle (mark level) unless firmware sends on it |
 | 5 | +12 VDC | Display's own separately fused 12 V rail |
 | 6 | Gnd (any Com device) | Board ground |
-| 7 | Com #2 In (Rx) | MAX3232 RIN2 (pin 8), to GPIO18 via ROUT2 (pin 9) |
+| 7 | Com #2 In (Rx) | MAX3232 RIN2 (pin 8), to GPIO7 via ROUT2 (pin 9) |
 | 8 | 20 mA loop (-), is GND | Board ground |
 
-MAX3232 wiring (3.3 V, 0.1 uF charge-pump caps; GPIO from `config.h`): GPIO16 -> DIN1 (11) -> DOUT1 (14) -> J905 2;
-J905 3 -> RIN1 (13) -> ROUT1 (12) -> GPIO15; GPIO17 -> DIN2 (10) -> DOUT2 (7) -> J905 4;
-J905 7 -> RIN2 (8) -> ROUT2 (9) -> GPIO18. Data lines only: the J905 has no RTS/CTS. Only channel 1 TX carries
+MAX3232 wiring (3.3 V, 0.1 uF charge-pump caps; GPIO from `config.h`): GPIO5 -> DIN1 (11) -> DOUT1 (14) -> J905 2;
+J905 3 -> RIN1 (13) -> ROUT1 (12) -> GPIO4; GPIO6 -> DIN2 (10) -> DOUT2 (7) -> J905 4;
+J905 7 -> RIN2 (8) -> ROUT2 (9) -> GPIO7. Data lines only: the J905 has no RTS/CTS. Only channel 1 TX carries
 the scoreboard data; UART2 is opened by the firmware and left idle.
 
 MAX3232E datasheet checks (SLLS664E):
@@ -159,7 +159,7 @@ MAX3232E datasheet checks (SLLS664E):
 - **VCC bypass: 1 uF minimum** (plus 0.1 uF if wanted) between pins 16 and 15. The D/DB/PW packages need it to meet
   the IEC 61000-4-2 rating (+/-8 kV contact, +/-15 kV air). Charge-pump caps: all four 0.1 uF at 3.3 V +/-0.3 V
   (0.47 uF for C2-C4 if the 3 V to 5.5 V range is wanted). Keep C1/C2 traces short.
-- **DIN1 and DIN2 must never float.** The ESP32 GPIO16/17 are high impedance during reset and boot, so add a 100 kohm
+- **DIN1 and DIN2 must never float.** The ESP32 GPIO5/6 are high impedance during reset and boot, so add a 100 kohm
   pull-up to 3V3 on each. High DIN gives the idle (mark) level of about -5.4 V on DOUT, the correct quiet line.
 - **Unpowered:** the chip may be connected to an active RS-232 device (display rail live, MAX3232 off).
 - **Fault ratings:** DOUT absolute max +/-13.2 V; V+ max 7 V, V- -7 V to +0.3 V; RIN +/-25 V (about 5 kohm

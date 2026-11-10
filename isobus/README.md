@@ -66,6 +66,6 @@ the VT to scale it for other sizes. Object IDs are in `src/isobus_ids.h` (genera
   ESP32; confirm the TWAI plugin works on the ESP32-S3.
 - The NAME uses manufacturer code 1407, which AgIsoStack++ documents for projects built on it.
   Read its README for the terms, and get your own code before selling units.
-- Wiring: CAN transceiver on GPIO5 (TX) / GPIO6 (RX). Do not add 120 ohm termination when
+- Wiring: CAN transceiver on GPIO14 (TX) / GPIO13 (RX). Do not add 120 ohm termination when
   tapping an existing implement bus.
 - Setup edits write to flash from the ISOBUS task; the VT and CAN keep running during the write.

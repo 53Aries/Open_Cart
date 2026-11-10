@@ -10,27 +10,27 @@
 
 // ADS1220 (SPI mode 1). SCLK/MOSI are swapped vs the SPI2 IOMUX defaults (routed via GPIO matrix;
 // fine at 1 MHz) to avoid crossed traces on the PCB.
-#define PIN_ADS_DRDY   14
-#define PIN_ADS_MISO   13
+#define PIN_ADS_DRDY   15
+#define PIN_ADS_MISO   16
 #define PIN_ADS_SCLK   11
 #define PIN_ADS_MOSI   12
 #define PIN_ADS_CS     10
 #define ADS_SPI_HZ     1000000
 
 // Scoreboard serial
-#define PIN_SB_TX      16     // MAX3232 DIN1 (pin 11)
-#define PIN_SB_RX      15     // MAX3232 ROUT1 (pin 12)
+#define PIN_SB_TX      5      // MAX3232 DIN1 (pin 11)
+#define PIN_SB_RX      4      // MAX3232 ROUT1 (pin 12)
 #define PIN_SB_DE      8      // RS485 driver enable, -1 if unused
 #define SB_UART_NUM    1
 // Second MAX3232 channel (J905 pin 4 printer-style Tx via DOUT2, J905 pin 7 Com #2 Rx via RIN2).
 // Wired "just in case"; the port is opened and left idle (TX rests at the mark level).
-#define PIN_SB2_TX     17     // MAX3232 DIN2 (pin 10)
-#define PIN_SB2_RX     18     // MAX3232 ROUT2 (pin 9)
+#define PIN_SB2_TX     6      // MAX3232 DIN2 (pin 10)
+#define PIN_SB2_RX     7      // MAX3232 ROUT2 (pin 9)
 #define SB2_UART_NUM   2
 
 // CAN (TWAI)
-#define PIN_CAN_TX     5
-#define PIN_CAN_RX     6
+#define PIN_CAN_TX     14
+#define PIN_CAN_RX     13
 
 // On-board WS2812 RGB LED. GPIO48 on this board (v1.0 style; v1.1 boards use GPIO38).
 // PIN_STATUS_LED_ALT is a second pin to drive too, -1 = unused.

@@ -1,7 +1,7 @@
 // Open_Cart
 #pragma once
 // ADS1220 24-bit ADC driver for the ESP-IDF SPI master. SPI mode 1 (CPOL=0, CPHA=1).
-// Config: AIN0/AIN1 differential, gain 128 with PGA on, 20 SPS continuous,
+// Config: AIN1/AIN2 differential, gain 128 with PGA on, 20 SPS continuous,
 // 50/60 Hz rejection, reference = analog supply (ratiometric with the bridge excitation).
 //
 // Wire the bridge excitation and AVDD to the same 5 V rail. Register settings were checked

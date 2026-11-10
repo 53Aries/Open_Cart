@@ -18,8 +18,8 @@ static constexpr uint8_t CMD_RDATA = 0x10;
 static constexpr uint8_t CMD_RREG  = 0x20;   // | (reg << 2) | (n - 1)
 static constexpr uint8_t CMD_WREG  = 0x40;   // | (reg << 2) | (n - 1)
 
-// Register 0: MUX[7:4]=0000 (AIN0/AIN1), GAIN[3:1]=111 (128), PGA_BYPASS[0]=0
-static constexpr uint8_t REG0 = (0x0 << 4) | (0x7 << 1) | 0x0;
+// Register 0: MUX[7:4]=0011 (AINP=AIN1, AINN=AIN2), GAIN[3:1]=111 (128), PGA_BYPASS[0]=0
+static constexpr uint8_t REG0 = (0x3 << 4) | (0x7 << 1) | 0x0;
 // Register 1: DR[7:5]=000 (20 SPS), MODE[4:3]=00 (normal), CM[2]=1 (continuous), TS=0, BCS=0
 static constexpr uint8_t REG1 = (0x0 << 5) | (0x0 << 3) | (1 << 2);
 // Register 2: VREF[7:6]=11 (analog supply), 50/60[5:4]=01 (reject both), PSW=0, IDAC=000
@@ -116,7 +116,7 @@ esp_err_t ADS1220::calibrate_offset(int samples) {
     if (hi - lo > 2000)                 // expected noise is about 90 counts p-p at gain 128, 20 SPS
         ESP_LOGW(TAG, "offset readings are noisy; check the 5 V supply and layout");
 
-    err = write_regs(&REG0, 1);         // back to AIN0/AIN1
+    err = write_regs(&REG0, 1);         // back to AIN1/AIN2
     if (err != ESP_OK) return err;
     return command(CMD_START);          // restart continuous conversions on the bridge
 }
