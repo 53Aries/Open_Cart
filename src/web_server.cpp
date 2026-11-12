@@ -2,6 +2,9 @@
 #include "web_server.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -20,7 +23,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define UNLOAD_TEST_SEED 1   // set to 0 (or delete the seed code) before real use
+// 1 adds POST /api/unloads/seed, which writes 8 FAKE unloads into the real history. Bench testing only.
+#define UNLOAD_TEST_SEED 0
 
 static const char* TAG = "web";
 
@@ -234,15 +238,15 @@ async function dlcsv(){   // fetch first so the whole file is saved before anyth
 }
 async function hdl(){try{await dlcsv();}catch(e){alert('Download failed. Nothing was overwritten.');return;}await post('/api/unloads/continue');}
 async function hroll(){if(confirm('Overwrite the oldest unloads as new ones come in?'))await post('/api/unloads/continue');}
-async function clearhist(){await post('/api/unloads/clear');lastseq=null;loadhist();}
+async function clearhist(){const j=await post('/api/unloads/clear');if(j&&!j.ok)alert(j.error);lastseq=null;loadhist();}
 async function toggleunl(){const j=await post('/api/unload/toggle');if(j&&!j.ok)alert(j.error||'could not toggle unload');}
 async function loadunl(){const j=await (await fetch('/api/unload/config',{cache:'no-store'})).json();$('u_en').checked=!!j.en;$('u_start').value=j.start;$('u_quiet').value=j.quiet;$('u_min').value=j.min;}
-async function saveunl(){const p=new URLSearchParams();p.set('en',$('u_en').checked?1:0);p.set('start',$('u_start').value);p.set('quiet',$('u_quiet').value);p.set('min',$('u_min').value);await post('/api/unload/config',p.toString());loadunl();}
+async function saveunl(){const p=new URLSearchParams();p.set('en',$('u_en').checked?1:0);p.set('start',$('u_start').value);p.set('quiet',$('u_quiet').value);p.set('min',$('u_min').value);const j=await post('/api/unload/config',p.toString());if(!j||!j.ok)alert(j&&j.error||'could not save');loadunl();}
 let loaded=false;
 async function loadcells(){
  const j=await (await fetch('/api/cells',{cache:'no-store'})).json();
  $('c_n').value=j.n;$('c_cap').value=j.cap;$('c_mv').value=j.mv;
- $('c_info').innerHTML='Full scale '+Math.round(j.total).toLocaleString()+' lb · '+j.cpl.toFixed(2)+' counts/lb · excitation about '+Math.round(j.ma)+' mA (assumes 350 &Omega; cells)'+(j.ma>140?' <b>over the 150 mA supply limit</b>':'');
+ $('c_info').innerHTML='Full scale '+Math.round(j.total).toLocaleString()+' lb · '+j.cpl.toFixed(2)+' counts/lb · excitation about '+Math.round(j.ma)+' mA (assumes '+Math.round(j.ohm)+' &Omega; cells)'+(j.ma>140?' <b>over the 150 mA supply limit</b>':'');
 }
 async function savecells(){
  const p=new URLSearchParams();p.set('n',$('c_n').value);p.set('cap',$('c_cap').value);p.set('mv',$('c_mv').value);
@@ -289,26 +293,61 @@ async function save(){
  p.set('web',$('e_web').checked?1:0);p.set('sb',$('e_sb').checked?1:0);p.set('iso',$('e_iso').checked?1:0);
  p.set('inc',$('inc').value);p.set('win',$('win').value);p.set('ssid',$('ssid').value);p.set('pass',$('pass').value);
  if(!$('e_web').checked&&!confirm('Wi-Fi web page will be off after restart. To get it back, hold the recovery button while powering up. Continue?'))return;
- await post('/api/settings',p.toString());
+ const j=await post('/api/settings',p.toString());
+ if(!j||!j.ok){alert(j&&j.error||'could not save settings');return;}
  $('st').textContent='restarting... reconnect to the scale Wi-Fi';
 }
 post('/api/time','t='+Math.floor(Date.now()/1000));loadcells();loadSettings();loadfield();loadfw();tick();setInterval(tick,500);
 </script></body></html>)HTML";
 
 // -------------------------------------------------------------- helpers ----
+static int hex_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// Decodes in place. A '%' not followed by two hex digits is kept as is; "%00" is dropped
+// (a NUL would silently cut the value short).
 static void url_decode(char* s) {
     char* o = s;
     while (*s) {
-        if (*s == '+') { *o++ = ' '; ++s; }
-        else if (*s == '%' && s[1] && s[2]) {
-            char h[3] = {s[1], s[2], 0};
-            *o++ = static_cast<char>(std::strtol(h, nullptr, 16));
+        if (*s == '+') {
+            *o++ = ' ';
+            ++s;
+        } else if (*s == '%' && hex_val(s[1]) >= 0 && hex_val(s[2]) >= 0) {
+            const char c = static_cast<char>(hex_val(s[1]) * 16 + hex_val(s[2]));
+            if (c) *o++ = c;
             s += 3;
         } else {
             *o++ = *s++;
         }
     }
     *o = 0;
+}
+
+// Whole-string number parsing: rejects empty input, trailing junk, overflow, NaN and infinity.
+static bool parse_double(const char* s, double* out) {
+    char* end = nullptr;
+    errno = 0;
+    const double v = std::strtod(s, &end);
+    if (end == s || errno == ERANGE || !std::isfinite(v)) return false;
+    while (*end == ' ') ++end;
+    if (*end) return false;
+    *out = v;
+    return true;
+}
+
+static bool parse_long(const char* s, long* out) {
+    char* end = nullptr;
+    errno = 0;
+    const long v = std::strtol(s, &end, 10);
+    if (end == s || errno == ERANGE) return false;
+    while (*end == ' ') ++end;
+    if (*end) return false;
+    *out = v;
+    return true;
 }
 
 // Find key in an application/x-www-form-urlencoded body. Returns true and fills out (decoded).
@@ -371,6 +410,34 @@ static esp_err_t send_json(httpd_req_t* req, const char* json) {
     return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
 
+static esp_err_t send_ok(httpd_req_t* req) { return send_json(req, "{\"ok\":true}"); }
+
+// {"ok":false,"error":"..."}: the page shows the message to the user.
+static esp_err_t send_error(httpd_req_t* req, const char* msg) {
+    char e[192], buf[224];
+    json_escape(msg, e, sizeof(e));
+    std::snprintf(buf, sizeof(buf), "{\"ok\":false,\"error\":\"%s\"}", e);
+    return send_json(req, buf);
+}
+
+static const char* kNotSaved = "Applied, but it could not be saved to flash and will be lost at restart. Try again.";
+
+// After a tare/zero/calibration change: report whether it reached flash.
+static esp_err_t persist_and_reply(httpd_req_t* req) {
+    return app_persist_scale() ? send_ok(req) : send_error(req, kNotSaved);
+}
+
+// Appends to buf at *o and keeps *o inside the buffer even if the text is cut short.
+static void append(char* buf, size_t cap, size_t* o, const char* fmt, ...) __attribute__((format(printf, 4, 5)));
+static void append(char* buf, size_t cap, size_t* o, const char* fmt, ...) {
+    if (*o >= cap) return;
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = std::vsnprintf(buf + *o, cap - *o, fmt, ap);
+    va_end(ap);
+    if (n > 0) *o = std::min(cap - 1, *o + static_cast<size_t>(n));
+}
+
 static void restart_task(void*) {
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
@@ -396,12 +463,12 @@ static esp_err_t h_state(httpd_req_t* req) {
         "\"n_cal\":%u,\"motion\":%s,\"approx\":%s,\"has_cal\":%s,\"ready\":%s,"
         "\"ul_act\":%s,\"ul_run\":%.1f,\"ul_has\":%s,\"ul_last\":%.1f,\"ul_seq\":%u,\"ft\":%.1f,\"fn\":%u,\"hc\":%u,\"hcap\":%d,\"hneed\":%s,\"hp\":%u}",
         s.unload_manual ? "true" : "false", s.unload_auto ? "true" : "false",
-        s.display_lb, s.net_lb, s.gross_lb, s.tare_lb, s.raw, (unsigned)s.n_cal,
+        s.display_lb, s.net_lb, s.gross_lb, s.tare_lb, s.raw, static_cast<unsigned>(s.n_cal),
         s.motion ? "true" : "false", s.approximate ? "true" : "false",
         s.has_cal ? "true" : "false", s.ready ? "true" : "false",
         s.unloading ? "true" : "false", s.unload_running_lb, s.has_last_unload ? "true" : "false",
-        s.last_unload_lb, (unsigned)unload_log_newest_seq(), ft_lb, (unsigned)ft_n,
-        (unsigned)h_count, UNLOAD_LOG_CAPACITY, h_need ? "true" : "false", (unsigned)h_pend);
+        s.last_unload_lb, static_cast<unsigned>(unload_log_newest_seq()), ft_lb, static_cast<unsigned>(ft_n),
+        static_cast<unsigned>(h_count), UNLOAD_LOG_CAPACITY, h_need ? "true" : "false", static_cast<unsigned>(h_pend));
     return send_json(req, buf);
 }
 
@@ -413,49 +480,44 @@ static esp_err_t h_cal_get(httpd_req_t* req) {
         n = g_app.scale.get_calibration(pts, MAX_CAL_POINTS);
     }
     char buf[64 + MAX_CAL_POINTS * 64];
-    size_t o = std::snprintf(buf, sizeof(buf), "{\"points\":[");
+    size_t o = 0;
+    append(buf, sizeof(buf), &o, "{\"points\":[");
     for (size_t i = 0; i < n; ++i)
-        o += std::snprintf(buf + o, sizeof(buf) - o, "%s{\"raw\":%.1f,\"lb\":%.2f}", i ? "," : "", pts[i].raw, pts[i].lb);
-    std::snprintf(buf + o, sizeof(buf) - o, "]}");
+        append(buf, sizeof(buf), &o, "%s{\"raw\":%.1f,\"lb\":%.2f}", i ? "," : "", pts[i].raw, pts[i].lb);
+    append(buf, sizeof(buf), &o, "]}");
     return send_json(req, buf);
 }
 
 static esp_err_t h_tare(httpd_req_t* req) {
     { AppLock l; g_app.scale.tare(); }
-    app_persist_scale();
-    return send_json(req, "{\"ok\":true}");
+    return persist_and_reply(req);
 }
 
 static esp_err_t h_zero(httpd_req_t* req) {
     bool ok;
     { AppLock l; ok = g_app.scale.zero(); }
-    if (!ok) return send_json(req, "{\"ok\":false,\"error\":\"scale is still warming up\"}");
-    app_persist_scale();
-    return send_json(req, "{\"ok\":true}");
+    if (!ok) return send_error(req, "scale is still warming up");
+    return persist_and_reply(req);
 }
 
 static esp_err_t h_untare(httpd_req_t* req) {
     { AppLock l; g_app.scale.clear_tare(); }
-    app_persist_scale();
-    return send_json(req, "{\"ok\":true}");
+    return persist_and_reply(req);
 }
 
 static esp_err_t h_cal_add(httpd_req_t* req) {
     char body[64];
     if (!read_body(req, body, sizeof(body))) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
     char v[24];
-    if (!form_get(body, "lb", v, sizeof(v))) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "lb missing");
-    char* end = nullptr;
-    double lb = std::strtod(v, &end);
-    if (end == v) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "lb invalid");
+    double lb = 0;
+    if (!form_get(body, "lb", v, sizeof(v)) || !parse_double(v, &lb)) return send_error(req, "enter the known weight as a number");
     bool ok;
     {
         AppLock l;
         ok = g_app.scale.add_cal_point(lb);
     }
-    if (!ok) return send_json(req, "{\"ok\":false,\"error\":\"not ready, table full, or weights not increasing with signal\"}");
-    app_persist_scale();
-    return send_json(req, "{\"ok\":true}");
+    if (!ok) return send_error(req, "not ready, table full, or weights not increasing with signal");
+    return persist_and_reply(req);
 }
 
 // Calibrate from "the cart said <cart> lb, a certified scale said <cert> lb".
@@ -463,27 +525,21 @@ static esp_err_t h_cal_compare(httpd_req_t* req) {
     char body[96];
     if (!read_body(req, body, sizeof(body))) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
     char v[24];
-    char* end = nullptr;
-    if (!form_get(body, "cart", v, sizeof(v))) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "cart missing");
-    double cart = std::strtod(v, &end);
-    if (end == v) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "cart invalid");
-    if (!form_get(body, "cert", v, sizeof(v))) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "cert missing");
-    double cert = std::strtod(v, &end);
-    if (end == v) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "cert invalid");
+    double cart = 0, cert = 0;
+    if (!form_get(body, "cart", v, sizeof(v)) || !parse_double(v, &cart)) return send_error(req, "enter what the cart said as a number");
+    if (!form_get(body, "cert", v, sizeof(v)) || !parse_double(v, &cert)) return send_error(req, "enter what the certified scale said as a number");
     bool ok;
     {
         AppLock l;
         ok = g_app.scale.add_cal_from_reading(cart, cert);
     }
-    if (!ok) return send_json(req, "{\"ok\":false,\"error\":\"needs an existing calibration (set the zero first), table not full, and weights increasing with signal\"}");
-    app_persist_scale();
-    return send_json(req, "{\"ok\":true}");
+    if (!ok) return send_error(req, "needs an existing calibration (set the zero first), table not full, and weights increasing with signal");
+    return persist_and_reply(req);
 }
 
 static esp_err_t h_cal_clear(httpd_req_t* req) {
     { AppLock l; g_app.scale.clear_calibration(); }
-    app_persist_scale();
-    return send_json(req, "{\"ok\":true}");
+    return persist_and_reply(req);
 }
 
 static esp_err_t h_settings_get(httpd_req_t* req) {
@@ -495,38 +551,63 @@ static esp_err_t h_settings_get(httpd_req_t* req) {
     std::snprintf(buf, sizeof(buf),
         "{\"web\":%u,\"sb\":%u,\"iso\":%u,\"inc\":%.2f,\"win\":%u,\"ssid\":\"%s\"}",
         s.enable_wifi_web, s.enable_scoreboard, s.enable_isobus,
-        s.display_increment_lb, (unsigned)s.filter_samples, ssid);
+        s.display_increment_lb, static_cast<unsigned>(s.filter_samples), ssid);
     return send_json(req, buf);
 }
+
+static esp_err_t start_restart(httpd_req_t* req, const char* json) {
+    send_json(req, json);
+    if (xTaskCreate(restart_task, "restart", 4096, nullptr, 5, nullptr) != pdPASS) esp_restart();
+    return ESP_OK;
+}
+
+// Wi-Fi SSID is limited to 32 bytes and a WPA2 passphrase to 8..63.
+static constexpr size_t kMaxSsidLen = 32, kMinPassLen = 8, kMaxPassLen = 63;
 
 static esp_err_t h_settings_post(httpd_req_t* req) {
     char body[384];
     if (!read_body(req, body, sizeof(body))) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
-    Settings s;
-    { AppLock l; s = g_app.settings; }
-    char v[80];
-    if (form_get(body, "web", v, sizeof(v))) s.enable_wifi_web = v[0] == '1';
-    if (form_get(body, "sb", v, sizeof(v)))  s.enable_scoreboard = v[0] == '1';
-    if (form_get(body, "iso", v, sizeof(v))) s.enable_isobus = v[0] == '1';
-    if (form_get(body, "inc", v, sizeof(v))) { double d = std::atof(v); if (d > 0 && d <= 1000) s.display_increment_lb = d; }
-    if (form_get(body, "win", v, sizeof(v))) { long w = std::atol(v); if (w >= 1 && w <= (long)Scale::kMaxWindow) s.filter_samples = (uint16_t)w; }
-    // Wi-Fi SSID is limited to 32 bytes and a WPA2 passphrase to 63.
-    if (form_get(body, "ssid", v, sizeof(v)) && v[0] && std::strlen(v) <= 32) copy_str(s.ap_ssid, sizeof(s.ap_ssid), v);
-    if (form_get(body, "pass", v, sizeof(v)) && std::strlen(v) >= 8 && std::strlen(v) <= 63) copy_str(s.ap_password, sizeof(s.ap_password), v);
-    app_save_settings(s);
-    send_json(req, "{\"ok\":true,\"restart\":true}");
-    if (xTaskCreate(restart_task, "restart", 4096, nullptr, 5, nullptr) != pdPASS) esp_restart();
-    return ESP_OK;
+    const char* error = nullptr;
+    const SaveResult r = app_update_settings([&](Settings& s) {
+        char v[80];
+        if (form_get(body, "web", v, sizeof(v))) s.enable_wifi_web = v[0] == '1';
+        if (form_get(body, "sb", v, sizeof(v)))  s.enable_scoreboard = v[0] == '1';
+        if (form_get(body, "iso", v, sizeof(v))) s.enable_isobus = v[0] == '1';
+        if (form_get(body, "inc", v, sizeof(v))) {
+            double d = 0;
+            if (!parse_double(v, &d) || !display_increment_ok(d)) { error = "Display rounding must be more than 0 and at most 1000 lb"; return false; }
+            s.display_increment_lb = d;
+        }
+        if (form_get(body, "win", v, sizeof(v))) {
+            long w = 0;
+            if (!parse_long(v, &w) || !filter_samples_ok(w)) { error = "Filter samples must be a whole number from 1 to 64"; return false; }
+            s.filter_samples = static_cast<uint16_t>(w);
+        }
+        if (form_get(body, "ssid", v, sizeof(v))) {
+            const size_t n = std::strlen(v);
+            if (n < 1 || n > kMaxSsidLen) { error = "Wi-Fi name must be 1 to 32 characters"; return false; }
+            copy_str(s.ap_ssid, sizeof(s.ap_ssid), v);
+        }
+        if (form_get(body, "pass", v, sizeof(v)) && v[0]) {   // blank keeps the current password
+            const size_t n = std::strlen(v);
+            if (n < kMinPassLen || n > kMaxPassLen) { error = "Wi-Fi password must be 8 to 63 characters"; return false; }
+            copy_str(s.ap_password, sizeof(s.ap_password), v);
+        }
+        return true;
+    });
+    if (r == SaveResult::Invalid) return send_error(req, error ? error : "invalid settings");
+    if (r == SaveResult::Failed) return send_error(req, "Settings could not be saved to flash. Nothing was changed; try again.");
+    return start_restart(req, "{\"ok\":true,\"restart\":true}");
 }
 
 static esp_err_t h_cells_get(httpd_req_t* req) {
     CellConfig c;
     double cpl;
     { AppLock l; c = g_app.cells; cpl = g_app.scale.nominal_counts_per_lb(); }
-    char buf[160];
-    std::snprintf(buf, sizeof(buf), "{\"n\":%u,\"cap\":%.0f,\"mv\":%.3f,\"total\":%.0f,\"cpl\":%.3f,\"ma\":%.0f}",
-        (unsigned)c.n_cells, c.capacity_lb, c.mv_per_v, c.total_capacity_lb(), cpl,
-        1000.0 * BRIDGE_EXCITATION_V * c.n_cells / CELL_RESISTANCE_OHM);
+    char buf[192];
+    std::snprintf(buf, sizeof(buf), "{\"n\":%u,\"cap\":%.0f,\"mv\":%.3f,\"total\":%.0f,\"cpl\":%.3f,\"ma\":%.0f,\"ohm\":%.0f}",
+        static_cast<unsigned>(c.n_cells), c.capacity_lb, c.mv_per_v, c.total_capacity_lb(), cpl,
+        1000.0 * BRIDGE_EXCITATION_V * c.n_cells / CELL_RESISTANCE_OHM, CELL_RESISTANCE_OHM);
     return send_json(req, buf);
 }
 
@@ -536,17 +617,15 @@ static esp_err_t h_cells_post(httpd_req_t* req) {
     CellConfig c;
     { AppLock l; c = g_app.cells; }
     char v[24];
-    if (form_get(body, "n", v, sizeof(v)))   c.n_cells = static_cast<uint8_t>(std::atoi(v));
-    if (form_get(body, "cap", v, sizeof(v))) c.capacity_lb = static_cast<float>(std::atof(v));
-    if (form_get(body, "mv", v, sizeof(v)))  c.mv_per_v = static_cast<float>(std::atof(v));
-    if (!c.valid()) return send_json(req, "{\"ok\":false,\"error\":\"cells 1-12, capacity 100-1,000,000 lb, 0.5-5 mV/V\"}");
-    cells_save(c);
-    {
-        AppLock l;
-        g_app.cells = c;
-        g_app.scale.set_nominal_counts_per_lb(Scale::nominal_slope(c));
-    }
-    return send_json(req, "{\"ok\":true}");
+    bool ok = true;
+    long n = 0;
+    double d = 0;
+    if (form_get(body, "n", v, sizeof(v)))   { ok = ok && parse_long(v, &n) && CellConfig::cells_ok(n); if (ok) c.n_cells = static_cast<uint8_t>(n); }
+    if (form_get(body, "cap", v, sizeof(v))) { ok = ok && parse_double(v, &d); if (ok) c.capacity_lb = static_cast<float>(d); }
+    if (form_get(body, "mv", v, sizeof(v)))  { ok = ok && parse_double(v, &d); if (ok) c.mv_per_v = static_cast<float>(d); }
+    if (!ok || !c.valid()) return send_error(req, "cells 1-12, capacity 100-1,000,000 lb, 0.5-5 mV/V");
+    if (!app_save_cells(c)) return send_error(req, "could not save to flash; nothing was changed");
+    return send_ok(req);
 }
 
 // Newest first, streamed because the full history is too big for one buffer.
@@ -565,7 +644,7 @@ static esp_err_t h_unloads_get(httpd_req_t* req) {
         char f[kFieldLen * 6 + 1];
         json_escape(r.field, f, sizeof(f));
         std::snprintf(buf, sizeof(buf), "%s{\"n\":%u,\"t\":%u,\"s\":%.1f,\"e\":%.1f,\"lb\":%.1f,\"f\":\"%s\"}",
-                      first ? "" : ",", (unsigned)r.seq, (unsigned)r.epoch, r.start_lb, r.end_lb, r.total_lb, f);
+                      first ? "" : ",", static_cast<unsigned>(r.seq), static_cast<unsigned>(r.epoch), r.start_lb, r.end_lb, r.total_lb, f);
         first = false;
         if (httpd_resp_sendstr_chunk(req, buf) != ESP_OK) return ESP_FAIL;
     }
@@ -601,8 +680,10 @@ static esp_err_t h_unloads_csv(httpd_req_t* req) {
             std::strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tm);
         }
         // Field names never contain quotes (stripped on entry), so quoting is enough for commas.
-        std::snprintf(buf, sizeof(buf), "%u,%s,\"%s\",%.1f,%.1f,%.1f\r\n",
-                      (unsigned)r.seq, when, r.field, r.start_lb, r.end_lb, r.total_lb);
+        // A leading = + - @ would make a spreadsheet run the name as a formula: prefix a quote mark.
+        const bool formula = std::strchr("=+-@", r.field[0]) != nullptr && r.field[0];
+        std::snprintf(buf, sizeof(buf), "%u,%s,\"%s%s\",%.1f,%.1f,%.1f\r\n",
+                      static_cast<unsigned>(r.seq), when, formula ? "'" : "", r.field, r.start_lb, r.end_lb, r.total_lb);
         if (httpd_resp_sendstr_chunk(req, buf) != ESP_OK) return ESP_FAIL;
     }
     return httpd_resp_sendstr_chunk(req, nullptr);
@@ -650,8 +731,13 @@ static esp_err_t h_fields_add(httpd_req_t* req) {
     if (!read_body(req, body, sizeof(body))) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
     char v[96] = "";
     form_get(body, "field", v, sizeof(v));
-    if (!field_add(v)) return send_json(req, "{\"ok\":false,\"error\":\"list is full (50 max) or the name is blank\"}");
-    return send_json(req, "{\"ok\":true}");
+    if (!field_add(v)) {
+        char msg[96];
+        std::snprintf(msg, sizeof(msg), "list is full (%u max), the name is blank, or it could not be saved",
+                      static_cast<unsigned>(kMaxFields));
+        return send_error(req, msg);
+    }
+    return send_ok(req);
 }
 
 static esp_err_t h_fields_delete(httpd_req_t* req) {
@@ -659,28 +745,28 @@ static esp_err_t h_fields_delete(httpd_req_t* req) {
     if (!read_body(req, body, sizeof(body))) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
     char v[96] = "";
     if (form_get(body, "field", v, sizeof(v))) field_remove(v);
-    return send_json(req, "{\"ok\":true}");
+    return send_ok(req);
 }
 
 #if UNLOAD_TEST_SEED
-// TEMPORARY: visit /api/unloads/seed to add 8 fake unloads (all stamped with the current time).
+// BENCH TESTING ONLY: POST /api/unloads/seed adds 8 fake unloads (all stamped with the current time).
 static esp_err_t h_unloads_seed(httpd_req_t* req) {
     static const double s[] = {31200, 29850, 30400, 28100, 31000, 27500, 30100, 29000};
     static const double e[] = {2400, 1900, 3100, 800, 2600, 1200, 2200, 1500};
     for (size_t i = 0; i < sizeof(s) / sizeof(s[0]); ++i) unload_log_append(s[i], e[i], s[i] - e[i]);
-    return send_json(req, "{\"ok\":true}");
+    return send_ok(req);
 }
 #endif
 
 static esp_err_t h_unloads_continue(httpd_req_t* req) {
     unload_log_continue();
-    return send_json(req, "{\"ok\":true}");
+    return send_ok(req);
 }
 
 static esp_err_t h_unloads_clear(httpd_req_t* req) {
-    unload_log_clear();
+    if (!unload_log_clear()) return send_error(req, "the history could not be erased; nothing was deleted");
     { AppLock l; g_app.unload.invalidate(); }
-    return send_json(req, "{\"ok\":true}");
+    return send_ok(req);
 }
 
 static esp_err_t h_unl_cfg_get(httpd_req_t* req) {
@@ -691,8 +777,8 @@ static esp_err_t h_unl_cfg_get(httpd_req_t* req) {
 }
 
 static esp_err_t h_unload_toggle(httpd_req_t* req) {
-    if (!app_toggle_unload()) return send_json(req, "{\"ok\":false,\"error\":\"scale is not ready or not calibrated\"}");
-    return send_json(req, "{\"ok\":true}");
+    if (!app_toggle_unload()) return send_error(req, "scale is not ready or not calibrated");
+    return send_ok(req);
 }
 
 static esp_err_t h_unl_cfg_post(httpd_req_t* req) {
@@ -700,13 +786,22 @@ static esp_err_t h_unl_cfg_post(httpd_req_t* req) {
     if (!read_body(req, body, sizeof(body))) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
     UnloadConfig c = unload_cfg_load();
     char v[24];
-    if (form_get(body, "start", v, sizeof(v))) { double d = std::atof(v); if (d >= 10 && d <= 20000) c.start_drop_lb = (float)d; }
-    if (form_get(body, "quiet", v, sizeof(v))) { double d = std::atof(v); if (d >= 1 && d <= 9) c.end_quiet_s = (float)d; }
-    if (form_get(body, "min", v, sizeof(v)))   { double d = std::atof(v); if (d >= 0 && d <= 100000) c.min_unload_lb = (float)d; }
-    if (form_get(body, "en", v, sizeof(v)))    c.enabled = std::atoi(v) != 0;
-    unload_cfg_save(c);
-    { AppLock l; g_app.unload.configure(c); }
-    return send_json(req, "{\"ok\":true}");
+    double d = 0;
+    if (form_get(body, "start", v, sizeof(v))) {
+        if (!parse_double(v, &d) || !UnloadTracker::start_drop_ok(d)) return send_error(req, "start drop must be 10 to 20,000 lb");
+        c.start_drop_lb = static_cast<float>(d);
+    }
+    if (form_get(body, "quiet", v, sizeof(v))) {
+        if (!parse_double(v, &d) || !UnloadTracker::quiet_ok(d)) return send_error(req, "end time must be 1 to 9 seconds");
+        c.end_quiet_s = static_cast<float>(d);
+    }
+    if (form_get(body, "min", v, sizeof(v))) {
+        if (!parse_double(v, &d) || !UnloadTracker::min_unload_ok(d)) return send_error(req, "minimum unload must be 0 to 100,000 lb");
+        c.min_unload_lb = static_cast<float>(d);
+    }
+    if (form_get(body, "en", v, sizeof(v))) c.enabled = v[0] == '1';
+    if (!app_save_unload_cfg(c)) return send_error(req, "could not save to flash; nothing was changed");
+    return send_ok(req);
 }
 
 // The page sends its clock so unloads can be time-stamped (the board has no RTC).
@@ -714,8 +809,13 @@ static esp_err_t h_time(httpd_req_t* req) {
     char body[48];
     if (!read_body(req, body, sizeof(body))) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
     char v[24];
-    if (form_get(body, "t", v, sizeof(v))) clock_set_from_client(static_cast<uint32_t>(std::strtoul(v, nullptr, 10)));
-    return send_json(req, "{\"ok\":true}");
+    if (form_get(body, "t", v, sizeof(v)) && v[0] >= '0' && v[0] <= '9') {   // digits only: strtoull accepts "-1"
+        char* end = nullptr;
+        errno = 0;
+        const unsigned long long t = std::strtoull(v, &end, 10);
+        if (*end == 0 && errno == 0 && t <= UINT32_MAX) clock_set_from_client(static_cast<uint32_t>(t));
+    }
+    return send_ok(req);
 }
 
 // ------------------------------------------------------ firmware update ----
@@ -758,11 +858,12 @@ static esp_err_t h_fw_post(httpd_req_t* req) {
     bool began = false, checked = false;
     size_t got = 0;
     static char buf[2048];   // handlers run one at a time on the httpd task
+    constexpr int kMaxIdleTimeouts = 6;   // about 30 s with no data (5 s receive timeout each)
     int idle = 0;
     while (got < total) {
         int r = httpd_req_recv(req, buf, std::min(sizeof(buf), total - got));
         if (r == HTTPD_SOCK_ERR_TIMEOUT) {
-            if (++idle > 6) break;   // about 30 s with no data
+            if (++idle > kMaxIdleTimeouts) break;
             continue;
         }
         if (r <= 0) break;
@@ -772,8 +873,13 @@ static esp_err_t h_fw_post(httpd_req_t* req) {
             const size_t off = sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t);
             while (static_cast<size_t>(r) < off + sizeof(esp_app_desc_t)) {   // the first read can be short
                 int m = httpd_req_recv(req, buf + r, sizeof(buf) - r);
-                if (m <= 0 && m != HTTPD_SOCK_ERR_TIMEOUT) return fw_fail(req, "upload interrupted");
-                if (m > 0) r += m;
+                if (m == HTTPD_SOCK_ERR_TIMEOUT) {
+                    if (++idle > kMaxIdleTimeouts) return fw_fail(req, "upload stalled");
+                    continue;
+                }
+                if (m <= 0) return fw_fail(req, "upload interrupted");
+                idle = 0;
+                r += m;
             }
             if (static_cast<size_t>(r) < off + sizeof(esp_app_desc_t) || static_cast<uint8_t>(buf[0]) != ESP_IMAGE_HEADER_MAGIC) {
                 return fw_fail(req, "not an app image (use firmware.bin, not firmware.factory.bin)");
@@ -785,7 +891,7 @@ static esp_err_t h_fw_post(httpd_req_t* req) {
             }
             if (esp_ota_begin(part, total, &h) != ESP_OK) return fw_fail(req, "could not start flash write");
             began = checked = true;
-            ESP_LOGI(TAG, "firmware update: %s (%s), %u bytes", name, nd.version, (unsigned)total);
+            ESP_LOGI(TAG, "firmware update: %s (%s), %u bytes", name, nd.version, static_cast<unsigned>(total));
         }
         if (esp_ota_write(h, buf, r) != ESP_OK) { esp_ota_abort(h); return fw_fail(req, "flash write failed"); }
         got += static_cast<size_t>(r);
@@ -797,19 +903,31 @@ static esp_err_t h_fw_post(httpd_req_t* req) {
     if (esp_ota_end(h) != ESP_OK) return fw_fail(req, "image is corrupt (checksum failed)");
     if (esp_ota_set_boot_partition(part) != ESP_OK) return fw_fail(req, "could not select the new firmware");
     ESP_LOGI(TAG, "firmware update installed, restarting");
-    send_json(req, "{\"ok\":true}");
-    if (xTaskCreate(restart_task, "restart", 4096, nullptr, 5, nullptr) != pdPASS) esp_restart();
-    return ESP_OK;
+    return start_restart(req, "{\"ok\":true}");
 }
 
 // ---------------------------------------------------------------- start ----
-static void wifi_ap_start() {
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_ap();
+// Logs and returns false on the first failing step. Wi-Fi failing must not stop the scale itself
+// (sampling and unload logging keep running), so nothing here restarts the board.
+#define WIFI_TRY(expr)                                                                   \
+    do {                                                                                 \
+        const esp_err_t e_ = (expr);                                                     \
+        if (e_ != ESP_OK) {                                                              \
+            ESP_LOGE(TAG, "Wi-Fi start failed at %s: %s", #expr, esp_err_to_name(e_));   \
+            return false;                                                                \
+        }                                                                                \
+    } while (0)
+
+static bool wifi_ap_start() {
+    WIFI_TRY(esp_netif_init());
+    WIFI_TRY(esp_event_loop_create_default());
+    if (!esp_netif_create_default_wifi_ap()) {
+        ESP_LOGE(TAG, "Wi-Fi start failed: could not create the AP interface");
+        return false;
+    }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    WIFI_TRY(esp_wifi_init(&cfg));
 
     Settings s;
     { AppLock l; s = g_app.settings; }
@@ -830,9 +948,9 @@ static void wifi_ap_start() {
         wc.ap.authmode = WIFI_AUTH_OPEN;   // only if somebody saved a short password; the UI blocks this
         ESP_LOGW(TAG, "AP password too short, running OPEN");
     }
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wc));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    WIFI_TRY(esp_wifi_set_mode(WIFI_MODE_AP));
+    WIFI_TRY(esp_wifi_set_config(WIFI_IF_AP, &wc));
+    WIFI_TRY(esp_wifi_start());
     // Full transmit power (units of 0.25 dBm, 80 = 20 dBm, the hardware maximum) and no modem sleep.
     // Must be set after esp_wifi_start().
     esp_wifi_set_ps(WIFI_PS_NONE);
@@ -851,18 +969,22 @@ static void wifi_ap_start() {
     } else {
         ESP_LOGW(TAG, "mDNS init failed; use the IP address");
     }
+    return true;
 }
+#undef WIFI_TRY
 
-void web_server_start() {
-    wifi_ap_start();
+static constexpr size_t kMaxUriHandlers = 32;
+
+bool web_server_start() {
+    if (!wifi_ap_start()) return false;
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 30;
+    cfg.max_uri_handlers = kMaxUriHandlers;
     cfg.stack_size = 6144;
     httpd_handle_t srv = nullptr;
     if (httpd_start(&srv, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start failed");
-        return;
+        return false;
     }
     const httpd_uri_t routes[] = {
         {"/", HTTP_GET, h_index, nullptr},
@@ -886,7 +1008,7 @@ void web_server_start() {
         {"/api/unloads/clear", HTTP_POST, h_unloads_clear, nullptr},
         {"/api/unloads/continue", HTTP_POST, h_unloads_continue, nullptr},
 #if UNLOAD_TEST_SEED
-        {"/api/unloads/seed", HTTP_GET, h_unloads_seed, nullptr},
+        {"/api/unloads/seed", HTTP_POST, h_unloads_seed, nullptr},
 #endif
         {"/api/unload/toggle", HTTP_POST, h_unload_toggle, nullptr},
         {"/api/unload/config", HTTP_GET, h_unl_cfg_get, nullptr},
@@ -897,5 +1019,14 @@ void web_server_start() {
         {"/api/fw", HTTP_GET, h_fw_get, nullptr},
         {"/api/fw", HTTP_POST, h_fw_post, nullptr},
     };
-    for (const auto& r : routes) httpd_register_uri_handler(srv, &r);
+    static_assert(sizeof(routes) / sizeof(routes[0]) <= kMaxUriHandlers, "raise kMaxUriHandlers");
+    bool ok = true;
+    for (const auto& r : routes) {
+        const esp_err_t err = httpd_register_uri_handler(srv, &r);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "could not register %s: %s", r.uri, esp_err_to_name(err));
+            ok = false;
+        }
+    }
+    return ok;
 }

@@ -74,6 +74,9 @@ void status_led_start(bool adc_ok) {
     g_strip = strip_new(PIN_STATUS_LED);
     g_strip_alt = strip_new(PIN_STATUS_LED_ALT);
     if (!g_strip && !g_strip_alt) return;
+    if (xTaskCreate(led_task, "led", 2560, nullptr, 2, nullptr) != pdPASS) {
+        ESP_LOGW(TAG, "could not start the status LED task");
+        return;
+    }
     ESP_LOGI(TAG, "status LED on GPIO%d", PIN_STATUS_LED);
-    xTaskCreate(led_task, "led", 2560, nullptr, 2, nullptr);
 }

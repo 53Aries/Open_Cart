@@ -9,33 +9,55 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "settings.h"
 
 static const char* TAG = "unload_log";
 static const char* PART = "unloads";
 static const char* NS = "log";
+// Keys in the main NVS namespace (kNvsNamespace). Never rename: saved data would be lost.
+static const char* KEY_FIELD = "field";
+static const char* KEY_FIELD_LIST = "flist";
+static const char* KEY_UNLOAD_CFG = "unl";
 
 static nvs_handle_t g_h;
 static bool g_open = false;
 static uint32_t g_next_seq = 1;
-static SemaphoreHandle_t g_lock;
+// Created once by unload_log_init(), before any other task runs. Guards everything below.
+static SemaphoreHandle_t g_lock = nullptr;
+
+namespace {
+class Guard {
+public:
+    Guard() { xSemaphoreTake(g_lock, portMAX_DELAY); }
+    ~Guard() { xSemaphoreGive(g_lock); }
+    Guard(const Guard&) = delete;
+    Guard& operator=(const Guard&) = delete;
+};
+}  // namespace
 
 static void key_for(uint32_t seq, char* k, size_t n) {
-    std::snprintf(k, n, "r%u", (unsigned)(seq % UNLOAD_LOG_CAPACITY));
+    std::snprintf(k, n, "r%u", static_cast<unsigned>(seq % UNLOAD_LOG_CAPACITY));
 }
 
 static char g_field[kFieldLen];
 static char g_list[kMaxFields][kFieldLen];   // saved field names; an empty string is a free slot
 
-static void list_save() {   // caller holds g_lock
+static bool list_save() {   // caller holds g_lock
     nvs_handle_t h;
-    if (nvs_open("scale", NVS_READWRITE, &h) != ESP_OK) return;
-    if (nvs_set_blob(h, "flist", g_list, sizeof(g_list)) == ESP_OK) nvs_commit(h);
-    nvs_close(h);
+    esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(h, KEY_FIELD_LIST, g_list, sizeof(g_list));
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    if (err != ESP_OK) ESP_LOGE(TAG, "field list save failed: %s", esp_err_to_name(err));
+    return err == ESP_OK;
 }
 
-static bool list_add(const char* clean) {   // caller holds g_lock; true if now in the list
+static bool list_add(const char* clean) {   // caller holds g_lock; true if now in the saved list
     if (strcasecmp(clean, kDefaultField) == 0) return false;
     int free_slot = -1;
     for (size_t i = 0; i < kMaxFields; ++i) {
@@ -44,7 +66,10 @@ static bool list_add(const char* clean) {   // caller holds g_lock; true if now 
     }
     if (free_slot < 0) return false;
     std::snprintf(g_list[free_slot], kFieldLen, "%s", clean);
-    list_save();
+    if (!list_save()) {
+        g_list[free_slot][0] = 0;   // keep RAM and flash in step
+        return false;
+    }
     return true;
 }
 
@@ -84,12 +109,18 @@ static void clean_field(const char* in, char* out) {
     if (!out[0]) std::snprintf(out, kFieldLen, "%s", kDefaultField);
 }
 
+static uint32_t newest_seq_locked() { return g_open ? g_next_seq - 1 : 0; }
+static size_t count_locked() {
+    const uint32_t n = newest_seq_locked();
+    return n > UNLOAD_LOG_CAPACITY ? UNLOAD_LOG_CAPACITY : n;
+}
+
 // Running total for the current field, summed over the records still in the ring.
 static uint32_t g_ok_until = UNLOAD_LOG_CAPACITY;   // highest seq that may be written without asking (see unload_log_append)
 static double g_ft_lb = 0;
 static uint32_t g_ft_n = 0;
 
-static void total_rescan() {   // caller holds g_lock (or runs at init)
+static void total_rescan() {   // caller holds g_lock
     g_ft_lb = 0;
     g_ft_n = 0;
     if (!g_open) return;
@@ -103,56 +134,65 @@ static void total_rescan() {   // caller holds g_lock (or runs at init)
 
 bool unload_log_init() {
     if (!g_lock) g_lock = xSemaphoreCreateMutex();
+    if (!g_lock) {
+        ESP_LOGE(TAG, "out of memory creating the history lock");
+        return false;
+    }
+    Guard guard;
+    std::snprintf(g_field, sizeof(g_field), "%s", kDefaultField);
+
     esp_err_t err = nvs_flash_init_partition(PART);
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase_partition(PART);
-        err = nvs_flash_init_partition(PART);
+        ESP_LOGE(TAG, "unload history partition unreadable (%s): erasing it", esp_err_to_name(err));
+        err = nvs_flash_erase_partition(PART);
+        if (err == ESP_OK) err = nvs_flash_init_partition(PART);
     }
     if (err == ESP_OK) err = nvs_open_from_partition(PART, NS, NVS_READWRITE, &g_h);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "unload history unavailable: %s", esp_err_to_name(err));
-        return false;
+    } else {
+        g_open = true;
+        // The newest record is the one with the highest seq.
+        uint32_t newest = 0;
+        for (uint32_t i = 0; i < UNLOAD_LOG_CAPACITY; ++i) {
+            char k[16];
+            std::snprintf(k, sizeof(k), "r%u", static_cast<unsigned>(i));
+            UnloadRecord r;
+            if (load_blob(k, &r) && r.seq > newest) newest = r.seq;
+        }
+        g_next_seq = newest + 1;
+        g_ok_until = newest > UNLOAD_LOG_CAPACITY ? newest : UNLOAD_LOG_CAPACITY;   // already past full: ask on the next one
     }
-    g_open = true;
 
-    // The newest record is the one with the highest seq.
-    uint32_t newest = 0;
-    for (uint32_t i = 0; i < UNLOAD_LOG_CAPACITY; ++i) {
-        char k[16];
-        std::snprintf(k, sizeof(k), "r%u", (unsigned)i);
-        UnloadRecord r;
-        if (load_blob(k, &r) && r.seq > newest) newest = r.seq;
-    }
-    g_next_seq = newest + 1;
-    g_ok_until = newest > UNLOAD_LOG_CAPACITY ? newest : UNLOAD_LOG_CAPACITY;   // already past full: ask on the next one
-
-    std::snprintf(g_field, sizeof(g_field), "%s", kDefaultField);
     nvs_handle_t fh;
-    if (nvs_open("scale", NVS_READONLY, &fh) == ESP_OK) {
+    if (nvs_open(kNvsNamespace, NVS_READONLY, &fh) == ESP_OK) {
         char buf[kFieldLen];
         size_t flen = sizeof(buf);
-        if (nvs_get_str(fh, "field", buf, &flen) == ESP_OK) clean_field(buf, g_field);
+        if (nvs_get_str(fh, KEY_FIELD, buf, &flen) == ESP_OK) clean_field(buf, g_field);
         size_t llen = sizeof(g_list);
         // A list saved with a smaller kMaxFields is a prefix of this one; the rest stays zero.
         std::memset(g_list, 0, sizeof(g_list));
-        if (nvs_get_blob(fh, "flist", g_list, &llen) != ESP_OK) std::memset(g_list, 0, sizeof(g_list));
+        if (nvs_get_blob(fh, KEY_FIELD_LIST, g_list, &llen) != ESP_OK) std::memset(g_list, 0, sizeof(g_list));
         for (auto& e : g_list) e[kFieldLen - 1] = 0;
         nvs_close(fh);
     }
     total_rescan();
+    if (!g_open) return false;
 
     nvs_stats_t st;
     if (nvs_get_stats(PART, &st) == ESP_OK)
-        ESP_LOGI(TAG, "%u unloads stored, capacity %d; flash entries used %u of %u", (unsigned)unload_log_count(),
-                 UNLOAD_LOG_CAPACITY, (unsigned)st.used_entries, (unsigned)st.total_entries);
+        ESP_LOGI(TAG, "%u unloads stored, capacity %d; flash entries used %u of %u", static_cast<unsigned>(count_locked()),
+                 UNLOAD_LOG_CAPACITY, static_cast<unsigned>(st.used_entries), static_cast<unsigned>(st.total_entries));
     return true;
 }
 
 // Once the ring is full, the next unload would overwrite the oldest. Until the user chooses
 // (download first, or let it roll over), new unloads wait in RAM. Writes are allowed up to
 // seq g_ok_until; a choice moves it kRollPrompt further and writes whatever is waiting.
+// Unloads whose flash write failed wait in the same list and are retried.
 static constexpr size_t kPendingMax = 20;
 static constexpr uint32_t kRollPrompt = 100;   // rollovers allowed before asking again
+static constexpr TickType_t kRetryPeriod = pdMS_TO_TICKS(5000);
 static UnloadRecord g_pend[kPendingMax];
 static size_t g_npend = 0;
 
@@ -175,134 +215,180 @@ static bool write_locked(UnloadRecord r) {   // caller holds g_lock; assigns the
     return true;
 }
 
-static void flush_pending_locked() {
-    for (size_t i = 0; i < g_npend; ++i) write_locked(g_pend[i]);
-    g_npend = 0;
+// Writes waiting unloads oldest first, stopping at the first failure (or at the full-history
+// limit unless roll_over) so the history stays in time order. True if nothing is left waiting.
+static bool flush_pending_locked(bool roll_over) {
+    size_t done = 0;
+    while (done < g_npend && (roll_over || g_next_seq <= g_ok_until) && write_locked(g_pend[done])) ++done;
+    if (done) {
+        std::memmove(g_pend, g_pend + done, (g_npend - done) * sizeof(g_pend[0]));
+        g_npend -= done;
+    }
+    return g_npend == 0;
+}
+
+static bool hold_locked(const UnloadRecord& r) {
+    if (g_npend >= kPendingMax) return false;
+    g_pend[g_npend++] = r;
+    if (g_next_seq > g_ok_until)
+        ESP_LOGW(TAG, "history full: unload held until the user chooses (%u waiting)", static_cast<unsigned>(g_npend));
+    else
+        ESP_LOGW(TAG, "unload held in RAM, will retry the flash write (%u waiting)", static_cast<unsigned>(g_npend));
+    return true;
 }
 
 bool unload_log_append(double start_lb, double end_lb, double total_lb) {
-    if (!g_open) return false;
-    xSemaphoreTake(g_lock, portMAX_DELAY);
+    if (!g_open) {
+        ESP_LOGE(TAG, "history unavailable: unload of %.0f lb NOT saved", total_lb);
+        return false;
+    }
+    Guard guard;
     UnloadRecord r{};
-    time_t now = time(nullptr);
-    r.epoch = now > 1600000000 ? static_cast<uint32_t>(now) : 0;
+    const time_t now = time(nullptr);
+    r.epoch = now > kClockValidEpoch ? static_cast<uint32_t>(now) : 0;
     r.start_lb = static_cast<float>(start_lb);
     r.end_lb = static_cast<float>(end_lb);
     r.total_lb = static_cast<float>(total_lb);
     std::snprintf(r.field, sizeof(r.field), "%s", g_field);
-    bool ok = true;
-    if (g_next_seq > g_ok_until && g_npend < kPendingMax) {
-        g_pend[g_npend++] = r;
-        ESP_LOGW(TAG, "history full: unload held until the user chooses (%u waiting)", (unsigned)g_npend);
-    } else {
-        flush_pending_locked();   // only non-empty when the waiting list overflowed: roll over rather than lose it
-        ok = write_locked(r);
-    }
-    xSemaphoreGive(g_lock);
-    return ok;
+
+    // Earlier waiting unloads go first.
+    if (flush_pending_locked(false) && g_next_seq <= g_ok_until && write_locked(r)) return true;
+    if (hold_locked(r)) return true;
+    // The RAM list is full too. If it is full because the user has not chosen, roll over rather than lose unloads.
+    if (g_next_seq > g_ok_until && flush_pending_locked(true) && write_locked(r)) return true;
+    if (hold_locked(r)) return true;
+    ESP_LOGE(TAG, "unload of %.0f lb could NOT be saved (flash writes failing)", total_lb);
+    return false;
+}
+
+void unload_log_service() {
+    if (!g_open) return;
+    static TickType_t last = 0;
+    const TickType_t now = xTaskGetTickCount();
+    if (now - last < kRetryPeriod) return;
+    last = now;
+    Guard guard;
+    if (g_npend && g_next_seq <= g_ok_until) flush_pending_locked(false);
 }
 
 void unload_log_continue() {
     if (!g_open) return;
-    xSemaphoreTake(g_lock, portMAX_DELAY);
-    flush_pending_locked();
+    Guard guard;
+    flush_pending_locked(true);
     g_ok_until = (g_next_seq - 1) + kRollPrompt;
-    xSemaphoreGive(g_lock);
 }
 
 void unload_log_status(uint32_t* count, bool* need_choice, uint32_t* pending) {
-    xSemaphoreTake(g_lock, portMAX_DELAY);
-    *count = unload_log_count();
+    *count = 0;
+    *need_choice = false;
+    *pending = 0;
+    if (!g_lock) return;
+    Guard guard;
+    *count = static_cast<uint32_t>(count_locked());
     *need_choice = g_open && g_next_seq > g_ok_until;
     *pending = static_cast<uint32_t>(g_npend);
-    xSemaphoreGive(g_lock);
 }
 
-uint32_t unload_log_newest_seq() { return g_open ? g_next_seq - 1 : 0; }
+uint32_t unload_log_newest_seq() {
+    if (!g_lock) return 0;
+    Guard guard;
+    return newest_seq_locked();
+}
 
 size_t unload_log_count() {
-    uint32_t n = unload_log_newest_seq();
-    return n > UNLOAD_LOG_CAPACITY ? UNLOAD_LOG_CAPACITY : n;
+    if (!g_lock) return 0;
+    Guard guard;
+    return count_locked();
 }
 
 bool unload_log_read(uint32_t seq, UnloadRecord* out) {
     if (!g_open || seq == 0) return false;
+    Guard guard;
     return read_slot(seq, out);
 }
 
 void field_get(char* out, size_t cap) {
-    if (!g_lock) g_lock = xSemaphoreCreateMutex();
-    xSemaphoreTake(g_lock, portMAX_DELAY);
+    if (!g_lock) {
+        std::snprintf(out, cap, "%s", kDefaultField);
+        return;
+    }
+    Guard guard;
     std::snprintf(out, cap, "%s", g_field[0] ? g_field : kDefaultField);
-    xSemaphoreGive(g_lock);
 }
 
 void field_set(const char* name) {
+    if (!g_lock) return;
     char clean[kFieldLen];
     clean_field(name ? name : "", clean);
-    if (!g_lock) g_lock = xSemaphoreCreateMutex();
-    xSemaphoreTake(g_lock, portMAX_DELAY);
+    Guard guard;
     const bool changed = strcasecmp(g_field, clean) != 0;
     std::snprintf(g_field, sizeof(g_field), "%s", clean);
     if (changed) total_rescan();
     list_add(clean);
     nvs_handle_t h;
-    if (nvs_open("scale", NVS_READWRITE, &h) == ESP_OK) {
-        if (nvs_set_str(h, "field", clean) == ESP_OK) nvs_commit(h);
+    esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, KEY_FIELD, clean);
+        if (err == ESP_OK) err = nvs_commit(h);
         nvs_close(h);
     }
-    xSemaphoreGive(g_lock);
+    if (err != ESP_OK) ESP_LOGE(TAG, "current field save failed: %s", esp_err_to_name(err));
 }
 
 void field_total(double* lb, uint32_t* count) {
-    if (!g_lock) g_lock = xSemaphoreCreateMutex();
-    xSemaphoreTake(g_lock, portMAX_DELAY);
+    *lb = 0;
+    *count = 0;
+    if (!g_lock) return;
+    Guard guard;
     *lb = g_ft_lb < 0 ? 0 : g_ft_lb;
     *count = g_ft_n;
-    xSemaphoreGive(g_lock);
 }
 
 size_t fields_list(char (*out)[kFieldLen], size_t max) {
-    if (!g_lock) g_lock = xSemaphoreCreateMutex();
-    xSemaphoreTake(g_lock, portMAX_DELAY);
+    if (!g_lock) return 0;
+    Guard guard;
     size_t n = 0;
     for (size_t i = 0; i < kMaxFields && n < max; ++i)
         if (g_list[i][0]) std::snprintf(out[n++], kFieldLen, "%s", g_list[i]);
-    xSemaphoreGive(g_lock);
     return n;
 }
 
 bool field_add(const char* name) {
+    if (!g_lock) return false;
     char clean[kFieldLen];
     clean_field(name ? name : "", clean);
-    if (!g_lock) g_lock = xSemaphoreCreateMutex();
-    xSemaphoreTake(g_lock, portMAX_DELAY);
-    bool ok = list_add(clean);
-    xSemaphoreGive(g_lock);
-    return ok;
+    Guard guard;
+    return list_add(clean);
 }
 
 void field_remove(const char* name) {
+    if (!g_lock) return;
     char clean[kFieldLen];
     clean_field(name ? name : "", clean);
-    if (!g_lock) g_lock = xSemaphoreCreateMutex();
-    xSemaphoreTake(g_lock, portMAX_DELAY);
-    for (auto& e : g_list)
-        if (e[0] && strcasecmp(e, clean) == 0) { e[0] = 0; list_save(); }
-    xSemaphoreGive(g_lock);
+    Guard guard;
+    bool changed = false;
+    for (auto& e : g_list) {
+        if (e[0] && strcasecmp(e, clean) == 0) { e[0] = 0; changed = true; }
+    }
+    if (changed) list_save();
 }
 
-void unload_log_clear() {
-    if (!g_open) return;
-    xSemaphoreTake(g_lock, portMAX_DELAY);
-    nvs_erase_all(g_h);
-    nvs_commit(g_h);
+bool unload_log_clear() {
+    if (!g_open) return false;
+    Guard guard;
+    esp_err_t err = nvs_erase_all(g_h);
+    if (err == ESP_OK) err = nvs_commit(g_h);
+    if (err != ESP_OK) {
+        // Keep the counters: records that were not erased must not be overwritten out of order.
+        ESP_LOGE(TAG, "clear failed: %s", esp_err_to_name(err));
+        return false;
+    }
     g_next_seq = 1;
     g_ok_until = UNLOAD_LOG_CAPACITY;
     g_ft_lb = 0;
     g_ft_n = 0;
-    flush_pending_locked();   // unloads that were waiting on a full history are newer than what was cleared
-    xSemaphoreGive(g_lock);
+    flush_pending_locked(false);   // unloads that were waiting are newer than what was cleared
+    return true;
 }
 
 // ---------------------------------------------------------------- thresholds ----
@@ -310,15 +396,16 @@ struct CfgBlob {
     uint32_t version;
     UnloadConfig cfg;
 };
+static_assert(sizeof(CfgBlob) == 20, "CfgBlob layout changed: saved unload thresholds would be lost");
 static constexpr uint32_t kCfgVersion = 1;
 
 UnloadConfig unload_cfg_load() {
     UnloadConfig def = UnloadTracker::default_config();
     nvs_handle_t h;
-    if (nvs_open("scale", NVS_READONLY, &h) != ESP_OK) return def;
+    if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) return def;
     CfgBlob b;
     size_t len = sizeof(b);
-    esp_err_t err = nvs_get_blob(h, "unl", &b, &len);
+    esp_err_t err = nvs_get_blob(h, KEY_UNLOAD_CFG, &b, &len);
     nvs_close(h);
     if (err != ESP_OK || len != sizeof(b) || b.version != kCfgVersion) return def;
     return b.cfg;
@@ -326,21 +413,27 @@ UnloadConfig unload_cfg_load() {
 
 bool unload_cfg_save(const UnloadConfig& c) {
     nvs_handle_t h;
-    if (nvs_open("scale", NVS_READWRITE, &h) != ESP_OK) return false;
-    CfgBlob b{kCfgVersion, c};
-    esp_err_t err = nvs_set_blob(h, "unl", &b, sizeof(b));
-    if (err == ESP_OK) err = nvs_commit(h);
-    nvs_close(h);
+    esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        CfgBlob b{kCfgVersion, c};
+        err = nvs_set_blob(h, KEY_UNLOAD_CFG, &b, sizeof(b));
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    if (err != ESP_OK) ESP_LOGE(TAG, "unload threshold save failed: %s", esp_err_to_name(err));
     return err == ESP_OK;
 }
 
 // --------------------------------------------------------------------- clock ----
 void clock_set_from_client(uint32_t epoch) {
-    if (epoch < 1600000000) return;
-    time_t now = time(nullptr);
-    long diff = static_cast<long>(epoch) - static_cast<long>(now);
-    if (now > 1600000000 && diff > -30 && diff < 30) return;
+    if (epoch < kClockValidEpoch) return;
+    const time_t now = time(nullptr);
+    const long diff = static_cast<long>(epoch) - static_cast<long>(now);
+    if (now > kClockValidEpoch && diff > -30 && diff < 30) return;
     timeval tv{static_cast<time_t>(epoch), 0};
-    settimeofday(&tv, nullptr);
-    ESP_LOGI(TAG, "clock set from browser: %u", (unsigned)epoch);
+    if (settimeofday(&tv, nullptr) != 0) {
+        ESP_LOGW(TAG, "could not set the clock");
+        return;
+    }
+    ESP_LOGI(TAG, "clock set from browser: %u", static_cast<unsigned>(epoch));
 }

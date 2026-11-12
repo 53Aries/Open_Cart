@@ -8,13 +8,25 @@
 #include "config.h"
 
 // Load cell layout. n_cells identical cells in parallel through a junction box.
+// Stored in NVS as raw bytes (see settings.cpp): do not add, remove or reorder data members.
 struct CellConfig {
+    static constexpr int kMinCells = 1, kMaxCells = 12;
+    static constexpr double kMinCapacityLb = 100, kMaxCapacityLb = 1000000;
+    static constexpr double kMinMvPerV = 0.5, kMaxMvPerV = 5.0;
+
     uint8_t n_cells;
     float capacity_lb;     // rated capacity of ONE cell
     float mv_per_v;        // rated output of one cell at capacity
     double total_capacity_lb() const { return n_cells * static_cast<double>(capacity_lb); }
-    bool valid() const { return n_cells >= 1 && n_cells <= 12 && capacity_lb >= 100 && capacity_lb <= 1000000 && mv_per_v >= 0.5 && mv_per_v <= 5.0; }
-    static CellConfig defaults() { return {DEFAULT_CELL_COUNT, (float)DEFAULT_CELL_CAPACITY_LB, (float)DEFAULT_CELL_MV_PER_V}; }
+    static bool cells_ok(long n) { return n >= kMinCells && n <= kMaxCells; }
+    // NaN fails every comparison, so it is rejected too.
+    bool valid() const {
+        return cells_ok(n_cells) && capacity_lb >= kMinCapacityLb && capacity_lb <= kMaxCapacityLb &&
+               mv_per_v >= kMinMvPerV && mv_per_v <= kMaxMvPerV;
+    }
+    static CellConfig defaults() {
+        return {DEFAULT_CELL_COUNT, static_cast<float>(DEFAULT_CELL_CAPACITY_LB), static_cast<float>(DEFAULT_CELL_MV_PER_V)};
+    }
 };
 
 struct CalPoint {
@@ -73,7 +85,9 @@ public:
     // Inverse of raw_to_lb (exposed for tests). Needs at least one calibration point.
     double lb_to_raw(double lb) const;
     void clear_calibration();
-    void set_calibration(const CalPoint* pts, size_t n);   // replaces everything; false-safe (ignored if invalid)
+    // Replaces everything. Points that are not finite are dropped; the rest are ignored as a whole
+    // if they are not monotonic (the current calibration is then kept).
+    void set_calibration(const CalPoint* pts, size_t n);
     size_t get_calibration(CalPoint* out, size_t max) const;
     size_t cal_count() const { return n_cal_; }
 

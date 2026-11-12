@@ -8,8 +8,8 @@ Scale::Scale()
     : window_(DEFAULT_FILTER_SAMPLES), head_(0), count_(0),
       increment_lb_(DEFAULT_DISPLAY_INCREMENT_LB), motion_lb_(DEFAULT_MOTION_THRESHOLD_LB),
       n_cal_(0), tare_lb_(0.0),
-      // 1.55 mV/V, gain 128, 5 cells x 31,000 lb: about 10.7 counts per lb
-      nominal_counts_per_lb_(nominal_slope(1.55, 128.0, 155000.0)) {
+      // Default cells (1.55 mV/V, gain 128, 5 cells x 31,000 lb): about 10.7 counts per lb
+      nominal_counts_per_lb_(nominal_slope(CellConfig::defaults())) {
     for (size_t i = 0; i < kMaxWindow; ++i) buf_[i] = 0;
 }
 
@@ -157,6 +157,8 @@ bool Scale::add_cal_point(double known_lb) {
 }
 
 bool Scale::add_cal_point_raw(double raw, double known_lb) {
+    // A NaN or infinite point would pass the monotonic check and make every reading NaN.
+    if (!std::isfinite(raw) || !std::isfinite(known_lb)) return false;
     CalPoint np{raw, known_lb};
 
     CalPoint tmp[MAX_CAL_POINTS + 1];
@@ -181,7 +183,11 @@ void Scale::clear_calibration() { n_cal_ = 0; }
 void Scale::set_calibration(const CalPoint* pts, size_t n) {
     if (n > MAX_CAL_POINTS) return;
     CalPoint tmp[MAX_CAL_POINTS];
-    for (size_t i = 0; i < n; ++i) tmp[i] = pts[i];
+    size_t kept = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (std::isfinite(pts[i].raw) && std::isfinite(pts[i].lb)) tmp[kept++] = pts[i];
+    }
+    n = kept;
     std::sort(tmp, tmp + n, [](const CalPoint& x, const CalPoint& y) { return x.raw < y.raw; });
     if (!monotonic(tmp, n)) return;
     for (size_t i = 0; i < n; ++i) cal_[i] = tmp[i];

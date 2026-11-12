@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include "driver/spi_master.h"
 #include "esp_err.h"
 
 class ADS1220 {
@@ -26,11 +27,15 @@ public:
 
 private:
     esp_err_t command(uint8_t cmd);
-    esp_err_t write_regs(const uint8_t* regs, size_t n);
-    esp_err_t read_regs(uint8_t* regs, size_t n);
+    esp_err_t write_regs(const uint8_t* regs, size_t n);   // n = 1..4, starting at register 0
+    esp_err_t read_regs(uint8_t* regs, size_t n);          // n = 1..4, starting at register 0
     esp_err_t read_raw(int32_t* out);
     bool wait_drdy(int timeout_ms) const;
+    esp_err_t configure();             // reset, write and verify the registers, measure the offset
+    void release_bus();                // undo begin() after a failure
 
-    void* dev_ = nullptr;              // spi_device_handle_t
+    static constexpr size_t kNumRegs = 4;
+    spi_device_handle_t dev_ = nullptr;
+    bool bus_ = false;                 // SPI bus initialized by begin()
     int32_t offset_ = 0;               // ADC offset in counts (subtracted in read())
 };

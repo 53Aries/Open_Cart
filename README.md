@@ -51,8 +51,10 @@ generated `sdkconfig.*` file.
 ## Host tests
 
 ```
-g++ -std=c++17 -I src -o /tmp/test_scale test/test_scale.cpp src/scale.cpp && /tmp/test_scale
+python scripts/run_tests.py
 ```
+
+Builds and runs `test/test_scale.cpp` and `test/test_unload.cpp` with `g++` or `clang++` (needs one on PATH).
 
 ## First use
 

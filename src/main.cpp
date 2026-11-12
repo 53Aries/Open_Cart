@@ -47,14 +47,28 @@ static void unload_task(void*) {
         UnloadTracker::Event ev;
         {
             AppLock l;
-            if (!g_app.scale.ready() || !g_app.scale.has_calibration()) g_app.unload.invalidate();
-            else ev = g_app.unload.update(g_app.scale.gross_lb());
+            if (!g_app.scale.has_calibration()) {
+                // No weight in pounds at all: nothing to measure an unload against.
+                if (g_app.unload.active()) ESP_LOGW(TAG, "calibration cleared during an unload: unload abandoned");
+                g_app.unload.invalidate();
+            } else if (g_app.scale.ready()) {
+                ev = g_app.unload.update(g_app.scale.gross_lb());
+            }
+            // else: the filter is refilling after a settings change (about 1 s). Pause rather than
+            // invalidate, so an unload in progress carries on and is still logged.
         }
         if (ev.finished) {
             ESP_LOGI(TAG, "unload finished: %.0f lb (%.0f -> %.0f)", ev.total_lb, ev.start_lb, ev.end_lb);
             unload_log_append(ev.start_lb, ev.end_lb, ev.total_lb);   // flash write outside the lock
         }
+        unload_log_service();   // retries unloads held after a failed flash write
     }
+}
+
+static bool start_task(TaskFunction_t fn, const char* name, uint32_t stack, UBaseType_t prio) {
+    if (xTaskCreate(fn, name, stack, nullptr, prio, nullptr) == pdPASS) return true;
+    ESP_LOGE(TAG, "could not start task \"%s\" (out of memory)", name);
+    return false;
 }
 
 static bool recovery_held() {
@@ -62,7 +76,7 @@ static bool recovery_held() {
     io.pin_bit_mask = 1ULL << PIN_RECOVERY;
     io.mode = GPIO_MODE_INPUT;
     io.pull_up_en = GPIO_PULLUP_ENABLE;
-    gpio_config(&io);
+    if (gpio_config(&io) != ESP_OK) return false;
     vTaskDelay(pdMS_TO_TICKS(20));
     return gpio_get_level(static_cast<gpio_num_t>(PIN_RECOVERY)) == 0;
 }
@@ -75,11 +89,16 @@ extern "C" void app_main() {
     }
     ESP_ERROR_CHECK(err);
 
-    g_app.lock = xSemaphoreCreateMutex();
-    settings_load(&g_app.settings);
+    // Nothing can run without the locks; restarting is the only useful response.
+    ESP_ERROR_CHECK(app_init() ? ESP_OK : ESP_ERR_NO_MEM);
 
+    {
+        AppLock l;
+        settings_load(&g_app.settings);
+    }
     if (recovery_held()) {
         ESP_LOGW(TAG, "recovery input held: forcing Wi-Fi web page on for this boot");
+        AppLock l;
         g_app.settings.enable_wifi_web = 1;
     }
 
@@ -93,7 +112,7 @@ extern "C" void app_main() {
         g_app.scale.set_nominal_counts_per_lb(Scale::nominal_slope(g_app.cells));
     }
 
-    unload_log_init();
+    const bool log_ok = unload_log_init();
     {
         AppLock l;
         g_app.unload.configure(unload_cfg_load());
@@ -109,19 +128,30 @@ extern "C" void app_main() {
         // Keep the web page up so the problem is visible, but there will be no readings.
         ESP_LOGE(TAG, "ADS1220 init failed: %s", esp_err_to_name(err));
     } else {
-        xTaskCreate(sample_task, "sample", 3072, nullptr, 6, nullptr);
+        start_task(sample_task, "sample", 3072, 6);
     }
 
     status_led_start(err == ESP_OK);
-    xTaskCreate(unload_task, "unload", 3072, nullptr, 3, nullptr);
+    const bool unload_ok = start_task(unload_task, "unload", 3072, 3);
 
-    const Settings s = g_app.settings;
-    if (s.enable_wifi_web) web_server_start();
+    Settings s;
+    {
+        AppLock l;
+        s = g_app.settings;
+    }
+    const bool web_ok = !s.enable_wifi_web || web_server_start();
     if (s.enable_scoreboard) scoreboard_start();
     if (s.enable_isobus) isobus_start();
 
-    // Everything came up, so keep this firmware (otherwise the bootloader rolls back after a reset).
-    esp_ota_mark_app_valid_cancel_rollback();
+    // Keep this firmware only if unload logging and the web page (the way to install another
+    // update) came up. Otherwise, if this is a fresh update, the bootloader rolls back to the
+    // previous firmware at the next reset; the scale keeps running meanwhile. On firmware that
+    // is already marked valid this call does nothing.
+    if (log_ok && unload_ok && web_ok) {
+        esp_ota_mark_app_valid_cancel_rollback();
+    } else {
+        ESP_LOGE(TAG, "start-up incomplete: firmware not marked valid");
+    }
 
     ESP_LOGI(TAG, "running: web=%u scoreboard=%u isobus=%u", s.enable_wifi_web, s.enable_scoreboard, s.enable_isobus);
 }

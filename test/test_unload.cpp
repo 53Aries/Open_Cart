@@ -10,7 +10,7 @@
 static int g_fail = 0;
 #define CHECK(cond) do { if (!(cond)) { std::printf("FAIL line %d: %s\n", __LINE__, #cond); ++g_fail; } } while (0)
 
-static double noise(double amp) { return (std::rand() / (double)RAND_MAX - 0.5) * 2.0 * amp; }
+static double noise(double amp) { return (std::rand() / static_cast<double>(RAND_MAX) - 0.5) * 2.0 * amp; }
 
 // Runs a weight profile (one value per 100 ms tick) and returns the finished unloads.
 static std::vector<double> run(UnloadTracker& t, const std::vector<double>& p) {

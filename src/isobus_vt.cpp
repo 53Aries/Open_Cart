@@ -91,7 +91,6 @@ isobus::TimeDateInterface g_time;
 // once a message with valid fields has arrived.
 bool g_td_valid = false;
 int g_td_offset_min = 0;
-TickType_t g_td_at = 0;
 QueueHandle_t g_q;
 
 // ------------------------------------------------------------ formatting ----
@@ -217,22 +216,22 @@ struct State {
     bool s_dirty = true;
 };
 
-State g;
+State g_ui;   // VT screen state (isobus_task only)
 
 void ui_message_reset() {
-    g.f_msg.clear();
-    g.c_msg.clear();
-    g.s_msg.clear();
-    g.roll_armed = g.del_armed = g.clr_armed = g.zero_armed = false;
+    g_ui.f_msg.clear();
+    g_ui.c_msg.clear();
+    g_ui.s_msg.clear();
+    g_ui.roll_armed = g_ui.del_armed = g_ui.clr_armed = g_ui.zero_armed = false;
 }
 
 void goto_tab(Tab t) {
-    if (t == g.tab) return;
+    if (t == g_ui.tab) return;
     if (g_vt->send_change_active_mask(vtid::WORKING_SET, kMaskId[t])) {
-        g.tab = t;
+        g_ui.tab = t;
         g_out.reset();             // the new mask shows pool defaults: send everything again
         ui_message_reset();
-        g.u_dirty = g.f_dirty = g.s_dirty = true;
+        g_ui.u_dirty = g_ui.f_dirty = g_ui.s_dirty = true;
     }
 }
 
@@ -244,7 +243,7 @@ void post(CmdType t, std::uint16_t id, std::uint32_t v, const char* text = nullp
     c.id = id;
     c.value = v;
     if (text) std::snprintf(c.text, sizeof(c.text), "%s", text);
-    xQueueSend(g_q, &c, 0);
+    if (xQueueSend(g_q, &c, 0) != pdTRUE) ESP_LOGW(TAG, "VT event dropped (queue full)");
 }
 
 void on_key(const VT::VTKeyEvent& e) {
@@ -258,7 +257,7 @@ void on_time(const isobus::TimeDateInterface::TimeAndDateInformation& info) {
     if (t.year < 2020 || t.month < 1 || t.month > 12 || t.day < 1 || t.day > 31 || t.hours > 23 || t.minutes > 59 || t.seconds > 59) return;
     const long long days = days_from_civil(t.year, t.month, t.day);
     const long long epoch = days * 86400 + t.hours * 3600 + t.minutes * 60 + t.seconds;
-    if (epoch < 1600000000 || epoch > 4000000000LL) return;
+    if (epoch < kClockValidEpoch || epoch > UINT32_MAX) return;
     const int off = t.localHourOffset * 60 + (t.localHourOffset < 0 ? -std::abs(t.localMinuteOffset) : std::abs(t.localMinuteOffset));
     post(CMD_TIME, static_cast<std::uint16_t>(static_cast<std::int16_t>(off)), static_cast<std::uint32_t>(epoch));
 }
@@ -271,63 +270,94 @@ void do_tare(bool clear) {
         AppLock l;
         if (clear) g_app.scale.clear_tare(); else g_app.scale.tare();
     }
-    app_persist_scale();
+    if (!app_persist_scale()) ESP_LOGE(TAG, "tare applied but not saved to flash");
 }
 
 void refresh_fields() {
     static char raw[kMaxFields][kFieldLen];
     const size_t n = fields_list(raw, kMaxFields);
-    g.list.assign(raw, raw + n);
-    std::sort(g.list.begin(), g.list.end(), [](const std::string& a, const std::string& b) { return strcasecmp(a.c_str(), b.c_str()) < 0; });
-    g.n_fields = n;
-    if (g.f_cursor >= static_cast<int>(g.n_fields)) g.f_cursor = static_cast<int>(g.n_fields) - 1;
-    if (g.f_cursor < 0) g.f_cursor = 0;
-    g.f_dirty = false;
+    g_ui.list.assign(raw, raw + n);
+    std::sort(g_ui.list.begin(), g_ui.list.end(), [](const std::string& a, const std::string& b) { return strcasecmp(a.c_str(), b.c_str()) < 0; });
+    g_ui.n_fields = n;
+    if (g_ui.f_cursor >= static_cast<int>(g_ui.n_fields)) g_ui.f_cursor = static_cast<int>(g_ui.n_fields) - 1;
+    if (g_ui.f_cursor < 0) g_ui.f_cursor = 0;
+    g_ui.f_dirty = false;
 }
+
+const char* const kNotSaved = "Could not save to flash; try again";
+const char* const kCalNotSaved = "Applied, but NOT saved to flash (lost at restart)";
 
 void apply_setup(std::uint16_t id, std::uint32_t raw) {
     double scale = 1;
     for (const auto& f : kSetup) if (f.id == id) scale = f.scale;
     const double v = raw * scale;
-    g.s_msg = "Saved";
+    bool in_range = true;
+    bool saved = false;
 
     if (id == vtid::S_INC || id == vtid::S_WIN) {
-        Settings s;
-        { AppLock l; s = g_app.settings; }
-        if (id == vtid::S_INC && v > 0 && v <= 1000) s.display_increment_lb = v;
-        else if (id == vtid::S_WIN && v >= 1 && v <= Scale::kMaxWindow) s.filter_samples = static_cast<uint16_t>(std::lround(v));
-        else { g.s_msg = "Value out of range"; }
-        if (g.s_msg == "Saved") {
-            app_save_settings(s);
+        const SaveResult r = app_update_settings([&](Settings& s) {
+            if (id == vtid::S_INC) {
+                if (!display_increment_ok(v)) return false;
+                s.display_increment_lb = v;
+            } else {
+                const long w = std::lround(v);
+                if (!filter_samples_ok(w)) return false;
+                s.filter_samples = static_cast<uint16_t>(w);
+            }
+            return true;
+        });
+        in_range = r != SaveResult::Invalid;
+        saved = r == SaveResult::Ok;
+        if (saved) {
+            Settings s;
             AppLock l;
+            s = g_app.settings;
+            // Refills the filter (about 1 s); the unload detector pauses meanwhile.
             g_app.scale.configure(s.filter_samples, s.display_increment_lb, s.motion_threshold_lb);
         }
     } else if (id == vtid::S_CELLS || id == vtid::S_CAP || id == vtid::S_MV) {
         CellConfig c;
         { AppLock l; c = g_app.cells; }
-        if (id == vtid::S_CELLS) c.n_cells = static_cast<uint8_t>(std::lround(v));
-        else if (id == vtid::S_CAP) c.capacity_lb = static_cast<float>(v);
-        else c.mv_per_v = static_cast<float>(v);
-        if (c.valid()) {
-            cells_save(c);
-            AppLock l;
-            g_app.cells = c;
-            g_app.scale.set_nominal_counts_per_lb(Scale::nominal_slope(c));
-            g.s_msg = "Saved. Re-calibrate if the real cells changed.";
+        if (id == vtid::S_CELLS) {
+            const long n = std::lround(v);
+            in_range = CellConfig::cells_ok(n);   // check before narrowing to uint8_t
+            if (in_range) c.n_cells = static_cast<uint8_t>(n);
+        } else if (id == vtid::S_CAP) {
+            c.capacity_lb = static_cast<float>(v);
         } else {
-            g.s_msg = "Cells 1-12, 100-1,000,000 lb, 0.5-5 mV/V";
+            c.mv_per_v = static_cast<float>(v);
         }
+        in_range = in_range && c.valid();
+        saved = in_range && app_save_cells(c);
     } else {
         UnloadConfig c = unload_cfg_load();
-        if (id == vtid::S_UDROP) c.start_drop_lb = static_cast<float>(v);
-        else if (id == vtid::S_UQUIET) c.end_quiet_s = static_cast<float>(v);
-        else if (id == vtid::S_UMIN) c.min_unload_lb = static_cast<float>(v);
-        else if (id == vtid::S_UAUTO) c.enabled = v >= 0.5;
-        unload_cfg_save(c);
-        AppLock l;
-        g_app.unload.configure(c);
+        if (id == vtid::S_UDROP) {
+            in_range = UnloadTracker::start_drop_ok(v);
+            c.start_drop_lb = static_cast<float>(v);
+        } else if (id == vtid::S_UQUIET) {
+            in_range = UnloadTracker::quiet_ok(v);
+            c.end_quiet_s = static_cast<float>(v);
+        } else if (id == vtid::S_UMIN) {
+            in_range = UnloadTracker::min_unload_ok(v);
+            c.min_unload_lb = static_cast<float>(v);
+        } else if (id == vtid::S_UAUTO) {
+            c.enabled = v >= 0.5;
+        }
+        saved = in_range && app_save_unload_cfg(c);
     }
-    g.s_dirty = true;   // re-send the stored values so the VT shows what was really kept
+
+    if (!in_range) {
+        g_ui.s_msg = (id == vtid::S_CELLS || id == vtid::S_CAP || id == vtid::S_MV)
+                         ? "Cells 1-12, 100-1,000,000 lb, 0.5-5 mV/V"
+                         : "Value out of range";
+    } else if (!saved) {
+        g_ui.s_msg = kNotSaved;
+    } else if (id == vtid::S_CELLS || id == vtid::S_CAP || id == vtid::S_MV) {
+        g_ui.s_msg = "Saved. Re-calibrate if the real cells changed.";
+    } else {
+        g_ui.s_msg = "Saved";
+    }
+    g_ui.s_dirty = true;   // re-send the stored values so the VT shows what was really kept
     for (const auto& f : kSetup) g_out.forget(f.id);
 }
 
@@ -335,83 +365,82 @@ void handle_key(std::uint16_t id) {
     for (const auto& b : kTabButtons) {
         if (b.id == id) { goto_tab(b.tab); return; }
     }
-    if (id == vtid::K_PREVTAB) { goto_tab(static_cast<Tab>((g.tab + TAB_COUNT - 1) % TAB_COUNT)); return; }
-    if (id == vtid::K_NEXTTAB) { goto_tab(static_cast<Tab>((g.tab + 1) % TAB_COUNT)); return; }
+    if (id == vtid::K_PREVTAB) { goto_tab(static_cast<Tab>((g_ui.tab + TAB_COUNT - 1) % TAB_COUNT)); return; }
+    if (id == vtid::K_NEXTTAB) { goto_tab(static_cast<Tab>((g_ui.tab + 1) % TAB_COUNT)); return; }
 
     const TickType_t now = xTaskGetTickCount();
     if (id == vtid::K_TARE) { do_tare(false); return; }
     if (id == vtid::K_UNTARE) { do_tare(true); return; }
     if (id == vtid::K_ZERO) {
         // Changes the saved calibration zero, so (like Delete) it needs a second press.
-        if (g.zero_armed && now - g.zero_armed_at < kArmTimeout) {
+        if (g_ui.zero_armed && now - g_ui.zero_armed_at < kArmTimeout) {
             bool ok;
             { AppLock l; ok = g_app.scale.zero(); }
-            if (ok) app_persist_scale();
-            g.zero_armed = false;
+            if (ok && !app_persist_scale()) ESP_LOGE(TAG, "zero applied but not saved to flash");
+            g_ui.zero_armed = false;
         } else {
-            g.zero_armed = true;
-            g.zero_armed_at = now;
+            g_ui.zero_armed = true;
+            g_ui.zero_armed_at = now;
         }
         return;
     }
     if (id == vtid::K_UNLOAD) { app_toggle_unload(); return; }
 
-    if (g.tab == TAB_UNL) {
-        if (id == vtid::K_NEWER && g.u_page > 0) { --g.u_page; g.u_dirty = true; }
+    if (g_ui.tab == TAB_UNL) {
+        if (id == vtid::K_NEWER && g_ui.u_page > 0) { --g_ui.u_page; g_ui.u_dirty = true; }
         else if (id == vtid::K_OLDER) {
-            if ((g.u_page + 1) * vtid::kUnloadRows < static_cast<int>(unload_log_count())) { ++g.u_page; g.u_dirty = true; }
+            if ((g_ui.u_page + 1) * vtid::kUnloadRows < static_cast<int>(unload_log_count())) { ++g_ui.u_page; g_ui.u_dirty = true; }
         } else if (id == vtid::K_ROLL) {
             uint32_t n = 0, pend = 0;
             bool need = false;
             unload_log_status(&n, &need, &pend);
             if (!need) return;
-            if (g.roll_armed && now - g.roll_armed_at < kArmTimeout) {
+            if (g_ui.roll_armed && now - g_ui.roll_armed_at < kArmTimeout) {
                 unload_log_continue();
-                g.roll_armed = false;
-                g.u_dirty = true;
+                g_ui.roll_armed = false;
+                g_ui.u_dirty = true;
             } else {
-                g.roll_armed = true;
-                g.roll_armed_at = now;
+                g_ui.roll_armed = true;
+                g_ui.roll_armed_at = now;
             }
         }
-    } else if (g.tab == TAB_FLD) {
-        if (id == vtid::K_UP && g.f_cursor > 0) --g.f_cursor;
-        else if (id == vtid::K_DOWN && g.f_cursor + 1 < static_cast<int>(g.n_fields)) ++g.f_cursor;
-        else if (id == vtid::K_USE && g.n_fields) {
-            field_set(g.list[g.f_cursor].c_str());
-            g.f_msg.clear();
-        } else if (id == vtid::K_DELETE && g.n_fields) {
-            if (g.del_armed && now - g.del_armed_at < kArmTimeout) {
-                field_remove(g.list[g.f_cursor].c_str());
-                g.del_armed = false;
-                g.f_msg.clear();
+    } else if (g_ui.tab == TAB_FLD) {
+        if (id == vtid::K_UP && g_ui.f_cursor > 0) --g_ui.f_cursor;
+        else if (id == vtid::K_DOWN && g_ui.f_cursor + 1 < static_cast<int>(g_ui.n_fields)) ++g_ui.f_cursor;
+        else if (id == vtid::K_USE && g_ui.n_fields) {
+            field_set(g_ui.list[g_ui.f_cursor].c_str());
+            g_ui.f_msg.clear();
+        } else if (id == vtid::K_DELETE && g_ui.n_fields) {
+            if (g_ui.del_armed && now - g_ui.del_armed_at < kArmTimeout) {
+                field_remove(g_ui.list[g_ui.f_cursor].c_str());
+                g_ui.del_armed = false;
+                g_ui.f_msg.clear();
                 refresh_fields();
             } else {
-                g.del_armed = true;
-                g.del_armed_at = now;
+                g_ui.del_armed = true;
+                g_ui.del_armed_at = now;
             }
         }
-    } else if (g.tab == TAB_CAL) {
+    } else if (g_ui.tab == TAB_CAL) {
         if (id == vtid::K_SETPT) {
             bool ok;
-            { AppLock l; ok = g_app.scale.add_cal_point(g.known_lb); }
-            if (ok) { app_persist_scale(); g.c_msg = "Point added"; }
-            else g.c_msg = "Not ready, table full, or weights not increasing with signal";
+            { AppLock l; ok = g_app.scale.add_cal_point(g_ui.known_lb); }
+            if (ok) g_ui.c_msg = app_persist_scale() ? "Point added" : kCalNotSaved;
+            else g_ui.c_msg = "Not ready, table full, or weights not increasing with signal";
         } else if (id == vtid::K_CMPCAL) {
             // "The cart said X, a certified scale said Y"
             bool ok;
-            { AppLock l; ok = g_app.scale.add_cal_from_reading(g.cart_lb, g.cert_lb); }
-            if (ok) { app_persist_scale(); g.c_msg = "Point added from certified scale"; }
-            else g.c_msg = "Needs zero set first, table not full, weights increasing with signal";
+            { AppLock l; ok = g_app.scale.add_cal_from_reading(g_ui.cart_lb, g_ui.cert_lb); }
+            if (ok) g_ui.c_msg = app_persist_scale() ? "Point added from certified scale" : kCalNotSaved;
+            else g_ui.c_msg = "Needs zero set first, table not full, weights increasing with signal";
         } else if (id == vtid::K_CLRCAL) {
-            if (g.clr_armed && now - g.clr_armed_at < kArmTimeout) {
+            if (g_ui.clr_armed && now - g_ui.clr_armed_at < kArmTimeout) {
                 { AppLock l; g_app.scale.clear_calibration(); }
-                app_persist_scale();
-                g.clr_armed = false;
-                g.c_msg = "Calibration cleared";
+                g_ui.clr_armed = false;
+                g_ui.c_msg = app_persist_scale() ? "Calibration cleared" : kCalNotSaved;
             } else {
-                g.clr_armed = true;
-                g.clr_armed_at = now;
+                g_ui.clr_armed = true;
+                g_ui.clr_armed_at = now;
             }
         }
     }
@@ -423,23 +452,22 @@ void handle_cmd(const Cmd& c) {
         handle_key(c.id);
         break;
     case CMD_NUMBER:
-        if (c.id == vtid::C_KNOWN) g.known_lb = c.value * 0.1;
-        else if (c.id == vtid::C_CART) g.cart_lb = c.value * 0.1;
-        else if (c.id == vtid::C_CERT) g.cert_lb = c.value * 0.1;
+        if (c.id == vtid::C_KNOWN) g_ui.known_lb = c.value * 0.1;
+        else if (c.id == vtid::C_CART) g_ui.cart_lb = c.value * 0.1;
+        else if (c.id == vtid::C_CERT) g_ui.cert_lb = c.value * 0.1;
         else for (const auto& f : kSetup) if (f.id == c.id) { apply_setup(c.id, c.value); break; }
         break;
     case CMD_TIME:
         g_td_offset_min = static_cast<std::int16_t>(c.id);
         g_td_valid = true;
-        g_td_at = xTaskGetTickCount();
         clock_set_from_client(c.value);   // only changes the clock if unset or more than 30 s off
         break;
     case CMD_STRING:
         if (c.id == vtid::F_NEW) {
             std::string name = trim(c.text);
             if (!name.empty()) {
-                if (field_add(name.c_str())) { g.f_msg = "Added"; g.f_dirty = true; }
-                else g.f_msg = "List full (50 max) or the name is not allowed";
+                if (field_add(name.c_str())) { g_ui.f_msg = "Added"; g_ui.f_dirty = true; }
+                else g_ui.f_msg = "List full (" + std::to_string(kMaxFields) + " max), name not allowed, or not saved";
             }
             g_out.forget(vtid::F_NEW);
             g_vt->send_change_string_value(vtid::F_NEW, std::string());   // clear the box
@@ -479,7 +507,7 @@ void show_home(const Snapshot& s) {
     {
         time_t now = time(nullptr);
         std::string clock = "Time: clock not set";
-        if (now > 1600000000) {
+        if (now > kClockValidEpoch) {
             clock = "Time: " + when_text(static_cast<uint32_t>(now));
             clock += g_td_valid ? " (tractor)" : " (UTC)";
         }
@@ -492,8 +520,8 @@ void show_home(const Snapshot& s) {
     std::string w;
     if (need) w = "Unload history is FULL. Open the Unloads tab to roll over, or download it on the web page.";
     else if (hc >= UNLOAD_LOG_CAPACITY * 9 / 10) w = "Unload history is nearly full (" + std::to_string(hc) + " of " + std::to_string(UNLOAD_LOG_CAPACITY) + ").";
-    if (g.zero_armed && xTaskGetTickCount() - g.zero_armed_at >= kArmTimeout) g.zero_armed = false;
-    if (g.zero_armed) w = "Cart empty? Press ZERO again to zero the scale.";
+    if (g_ui.zero_armed && xTaskGetTickCount() - g_ui.zero_armed_at >= kArmTimeout) g_ui.zero_armed = false;
+    if (g_ui.zero_armed) w = "Cart empty? Press ZERO again to zero the scale.";
     g_out.set_str(vtid::H_WARN, w, 120);
 }
 
@@ -502,14 +530,14 @@ void show_unloads() {
     bool need = false;
     unload_log_status(&count, &need, &pend);
     const uint32_t newest = unload_log_newest_seq();
-    if (newest != g.u_seen_seq || count != g.u_seen_count) { g.u_seen_seq = newest; g.u_seen_count = count; g.u_dirty = true; }
+    if (newest != g_ui.u_seen_seq || count != g_ui.u_seen_count) { g_ui.u_seen_seq = newest; g_ui.u_seen_count = count; g_ui.u_dirty = true; }
 
-    if (g.roll_armed && xTaskGetTickCount() - g.roll_armed_at >= kArmTimeout) g.roll_armed = false;
+    if (g_ui.roll_armed && xTaskGetTickCount() - g_ui.roll_armed_at >= kArmTimeout) g_ui.roll_armed = false;
 
-    if (g.u_dirty) {
-        const int first = g.u_page * vtid::kUnloadRows;
-        if (first >= static_cast<int>(count) && g.u_page > 0) { g.u_page = 0; }
-        const int start = g.u_page * vtid::kUnloadRows;
+    if (g_ui.u_dirty) {
+        const int first = g_ui.u_page * vtid::kUnloadRows;
+        if (first >= static_cast<int>(count) && g_ui.u_page > 0) { g_ui.u_page = 0; }
+        const int start = g_ui.u_page * vtid::kUnloadRows;
         double page_total = 0;
         int shown = 0;
         static const std::uint16_t rows[vtid::kUnloadRows] = {
@@ -532,11 +560,11 @@ void show_unloads() {
         else std::snprintf(hdr, sizeof(hdr), "Unloads %d-%d of %u (newest first)", start + 1, start + shown, static_cast<unsigned>(count));
         g_out.set_str(vtid::U_HDR, hdr, 60);
         g_out.set_str(vtid::U_FOOT, shown ? "Page total: " + commas(page_total) + " lb" : std::string(), 60);
-        g.u_dirty = false;
+        g_ui.u_dirty = false;
     }
 
     std::string m;
-    if (g.roll_armed) m = "Press Roll over again to overwrite the oldest unloads.";
+    if (g_ui.roll_armed) m = "Press Roll over again to overwrite the oldest unloads.";
     else if (need) m = "History FULL (" + std::to_string(UNLOAD_LOG_CAPACITY) + "). New unloads wait until you press Roll over.";
     else if (count >= UNLOAD_LOG_CAPACITY * 9 / 10) m = "History nearly full: " + std::to_string(count) + " of " + std::to_string(UNLOAD_LOG_CAPACITY);
     g_out.set_str(vtid::U_MSG, m, 120);
@@ -544,33 +572,35 @@ void show_unloads() {
 
 void show_fields() {
     TickType_t now = xTaskGetTickCount();
-    if (g.f_dirty || now - g.f_polled > pdMS_TO_TICKS(2000)) { refresh_fields(); g.f_polled = now; }
-    if (g.del_armed && now - g.del_armed_at >= kArmTimeout) g.del_armed = false;
+    if (g_ui.f_dirty || now - g_ui.f_polled > pdMS_TO_TICKS(2000)) { refresh_fields(); g_ui.f_polled = now; }
+    if (g_ui.del_armed && now - g_ui.del_armed_at >= kArmTimeout) g_ui.del_armed = false;
 
     char cur[kFieldLen];
     field_get(cur, sizeof(cur));
     g_out.set_str(vtid::F_CUR, std::string("Current: ") + cur, 60);
 
-    if (g.f_cursor < g.f_top) g.f_top = g.f_cursor;
-    if (g.f_cursor >= g.f_top + vtid::kFieldRows) g.f_top = g.f_cursor - vtid::kFieldRows + 1;
+    if (g_ui.f_cursor < g_ui.f_top) g_ui.f_top = g_ui.f_cursor;
+    if (g_ui.f_cursor >= g_ui.f_top + vtid::kFieldRows) g_ui.f_top = g_ui.f_cursor - vtid::kFieldRows + 1;
     static const std::uint16_t rows[vtid::kFieldRows] = {
         vtid::F_ROW0, vtid::F_ROW1, vtid::F_ROW2, vtid::F_ROW3, vtid::F_ROW4, vtid::F_ROW5, vtid::F_ROW6, vtid::F_ROW7, vtid::F_ROW8};
     for (int i = 0; i < vtid::kFieldRows; ++i) {
-        const int idx = g.f_top + i;
+        const int idx = g_ui.f_top + i;
         std::string line;
-        if (idx < static_cast<int>(g.n_fields)) {
-            line = std::string(idx == g.f_cursor ? ">" : " ") + (strcasecmp(g.list[idx].c_str(), cur) == 0 ? "* " : "  ") + g.list[idx];
-        } else if (g.n_fields == 0 && i == 0) {
+        if (idx < static_cast<int>(g_ui.n_fields)) {
+            line = std::string(idx == g_ui.f_cursor ? ">" : " ") + (strcasecmp(g_ui.list[idx].c_str(), cur) == 0 ? "* " : "  ") + g_ui.list[idx];
+        } else if (g_ui.n_fields == 0 && i == 0) {
             line = "  (no saved fields)";
         }
         g_out.set_str(rows[i], line, 40);
     }
-    std::string m = g.del_armed ? "Press Delete again to remove \"" + g.list[g.f_cursor] + "\"" : g.f_msg;
+    // The list can shrink under the cursor (another screen deleted fields): never index past its end.
+    if (g_ui.f_cursor >= static_cast<int>(g_ui.list.size())) g_ui.del_armed = false;
+    std::string m = g_ui.del_armed ? "Press Delete again to remove \"" + g_ui.list[g_ui.f_cursor] + "\"" : g_ui.f_msg;
     g_out.set_str(vtid::F_MSG, m, 60);
 }
 
 void show_cal(const Snapshot& s) {
-    if (g.clr_armed && xTaskGetTickCount() - g.clr_armed_at >= kArmTimeout) g.clr_armed = false;
+    if (g_ui.clr_armed && xTaskGetTickCount() - g_ui.clr_armed_at >= kArmTimeout) g_ui.clr_armed = false;
     g_out.set_str(vtid::C_GROSS, "Gross " + commas(s.gross_lb) + " lb   Tare " + commas(s.tare_lb) + " lb", 60);
     g_out.set_str(vtid::C_RAW, "Raw counts: " + commas(s.raw), 60);
 
@@ -590,7 +620,7 @@ void show_cal(const Snapshot& s) {
         }
         g_out.set_str(rows[i], line, 60);
     }
-    g_out.set_str(vtid::C_MSG, g.clr_armed ? std::string("Press Clear cal again to delete all points.") : g.c_msg, 120);
+    g_out.set_str(vtid::C_MSG, g_ui.clr_armed ? std::string("Press Clear cal again to delete all points.") : g_ui.c_msg, 120);
 }
 
 void show_setup() {
@@ -612,13 +642,13 @@ void show_setup() {
     char info[96];
     std::snprintf(info, sizeof(info), "Full scale %s lb, %.2f counts/lb", commas(cells.total_capacity_lb()).c_str(), cpl);
     g_out.set_str(vtid::S_INFO, info, 80);
-    g_out.set_str(vtid::S_MSG, g.s_msg, 80);
+    g_out.set_str(vtid::S_MSG, g_ui.s_msg, 80);
 }
 
 void update_screen() {
     g_out.budget = kMaxSendsPerTick;
     const Snapshot s = app_snapshot();
-    switch (g.tab) {
+    switch (g_ui.tab) {
     case TAB_HOME: show_home(s); break;
     case TAB_UNL: show_unloads(); break;
     case TAB_FLD: show_fields(); break;
@@ -675,6 +705,11 @@ void isobus_task(void*) {
     auto partnerVT = isobus::CANNetworkManager::CANNetwork.create_partnered_control_function(0, {vtFilter});
 
     g_q = xQueueCreate(16, sizeof(Cmd));
+    if (!g_q) {
+        ESP_LOGE(TAG, "out of memory creating the VT event queue");
+        vTaskDelete(nullptr);
+        return;
+    }
     g_vt = std::make_shared<VT>(partnerVT, internalECU);
 
     // The pool vector must outlive the client.
@@ -697,13 +732,13 @@ void isobus_task(void*) {
         const bool got = xQueueReceive(g_q, &c, pdMS_TO_TICKS(250)) == pdTRUE;
 
         const bool up = g_vt->get_is_connected();
-        if (up != g.connected) {
-            g.connected = up;
+        if (up != g_ui.connected) {
+            g_ui.connected = up;
             if (up) {
                 // A fresh connection shows the pool defaults on the Home mask.
                 ESP_LOGI(TAG, "VT connected");
-                g = State();
-                g.connected = true;
+                g_ui = State();
+                g_ui.connected = true;
                 g_out.reset();
             } else {
                 ESP_LOGW(TAG, "VT disconnected");
@@ -723,7 +758,7 @@ void isobus_task(void*) {
 }  // namespace
 
 void isobus_start() {
-    xTaskCreate(isobus_task, "isobus", 10240, nullptr, 5, nullptr);
+    if (xTaskCreate(isobus_task, "isobus", 10240, nullptr, 5, nullptr) != pdPASS) ESP_LOGE(TAG, "could not start the ISOBUS task");
 }
 
 #else  // !ENABLE_ISOBUS_BUILD

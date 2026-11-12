@@ -7,7 +7,6 @@ import subprocess
 import sys
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-env = sys.argv[1] if len(sys.argv) > 1 else "s3"
 
 
 def find_gh():
@@ -30,23 +29,29 @@ def run(*args, capture=False):
     return r.stdout.strip() if capture else None
 
 
-with open(os.path.join(root, "version.txt")) as f:
-    version = f.read().strip()
-image = os.path.join(root, ".pio", "build", env, "open_cart_v%s.bin" % version)
-if not os.path.exists(image):
-    sys.exit("%s not found. Run `pio run -e %s` first." % (image, env))
+def main():
+    env = sys.argv[1] if len(sys.argv) > 1 else "s3"
+    with open(os.path.join(root, "version.txt")) as f:
+        version = f.read().strip()
+    image = os.path.join(root, ".pio", "build", env, "open_cart_v%s.bin" % version)
+    if not os.path.exists(image):
+        sys.exit("%s not found. Run `pio run -e %s` first." % (image, env))
 
-dirty = [l for l in run("git", "status", "--porcelain", capture=True).splitlines() if not l.endswith("version.txt")]
-if dirty:
-    sys.exit("Commit or stash these first so the release matches the code you built:\n" + "\n".join(dirty))
+    dirty = [line for line in run("git", "status", "--porcelain", capture=True).splitlines() if not line.endswith("version.txt")]
+    if dirty:
+        sys.exit("Commit or stash these first so the release matches the code you built:\n" + "\n".join(dirty))
 
-tag = "v" + version
-if run("git", "tag", "--list", tag, capture=True):
-    sys.exit("tag %s already exists; build again to get a new version." % tag)
+    tag = "v" + version
+    if run("git", "tag", "--list", tag, capture=True):
+        sys.exit("tag %s already exists; build again to get a new version." % tag)
 
-run("git", "add", "version.txt")
-if run("git", "status", "--porcelain", "version.txt", capture=True):
-    run("git", "commit", "-m", "Release %s\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" % tag)
-run("git", "push", "origin", "HEAD")
-run(find_gh(), "release", "create", tag, image, "--title", tag, "--generate-notes", "--target", run("git", "rev-parse", "HEAD", capture=True))
-print("Released %s" % tag)
+    run("git", "add", "version.txt")
+    if run("git", "status", "--porcelain", "version.txt", capture=True):
+        run("git", "commit", "-m", "Release %s\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" % tag)
+    run("git", "push", "origin", "HEAD")
+    run(find_gh(), "release", "create", tag, image, "--title", tag, "--generate-notes", "--target", run("git", "rev-parse", "HEAD", capture=True))
+    print("Released %s" % tag)
+
+
+if __name__ == "__main__":
+    main()

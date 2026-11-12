@@ -13,6 +13,7 @@
 #include <cstdint>
 #include "config.h"
 
+// Stored in NVS as raw bytes (see unload_log.cpp): do not add, remove or reorder members.
 struct UnloadConfig {
     float start_drop_lb;    // drop below the recent peak that counts as "unloading"
     float end_quiet_s;      // seconds of no further drop that ends the unload (max 9)
@@ -29,6 +30,14 @@ public:
         bool finished = false;   // an unload ended and should be logged
         double start_lb = 0, end_lb = 0, total_lb = 0;
     };
+
+    // Allowed ranges for values entered on the web page or the VT.
+    static constexpr double kMinStartDropLb = 10, kMaxStartDropLb = 20000;
+    static constexpr double kMinQuietS = 1, kMaxQuietS = 9;
+    static constexpr double kMinUnloadLb = 0, kMaxUnloadLb = 100000;
+    static bool start_drop_ok(double v) { return v >= kMinStartDropLb && v <= kMaxStartDropLb; }   // NaN fails
+    static bool quiet_ok(double v) { return v >= kMinQuietS && v <= kMaxQuietS; }
+    static bool min_unload_ok(double v) { return v >= kMinUnloadLb && v <= kMaxUnloadLb; }
 
     UnloadTracker();
 

@@ -51,7 +51,7 @@ static void scoreboard_task(void*) {
     TickType_t period = pdMS_TO_TICKS(s.sb_interval_ms);
     if (period < 1) period = 1;
     TickType_t last = xTaskGetTickCount();
-    char buf[48];
+    char buf[16];
     for (;;) {
         Snapshot snap = app_snapshot();
         size_t n = scoreboard_format(buf, sizeof(buf), snap);
@@ -73,22 +73,33 @@ void scoreboard_start() {
     cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
     cfg.source_clk = UART_SCLK_DEFAULT;
 
-    ESP_ERROR_CHECK(uart_driver_install(port, 256, 256, 0, nullptr, 0));
-    ESP_ERROR_CHECK(uart_param_config(port, &cfg));
-
-    if (s.sb_use_rs485 && PIN_SB_DE >= 0) {
-        ESP_ERROR_CHECK(uart_set_pin(port, PIN_SB_TX, PIN_SB_RX, PIN_SB_DE, UART_PIN_NO_CHANGE));
-        ESP_ERROR_CHECK(uart_set_mode(port, UART_MODE_RS485_HALF_DUPLEX));
-    } else {
-        ESP_ERROR_CHECK(uart_set_pin(port, PIN_SB_TX, PIN_SB_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    // The scoreboard is optional: on any error log it and carry on, never restart the scale.
+    esp_err_t err = uart_driver_install(port, 256, 256, 0, nullptr, 0);
+    if (err == ESP_OK) err = uart_param_config(port, &cfg);
+    if (err == ESP_OK) {
+        if (s.sb_use_rs485 && PIN_SB_DE >= 0) {
+            err = uart_set_pin(port, PIN_SB_TX, PIN_SB_RX, PIN_SB_DE, UART_PIN_NO_CHANGE);
+            if (err == ESP_OK) err = uart_set_mode(port, UART_MODE_RS485_HALF_DUPLEX);
+        } else {
+            err = uart_set_pin(port, PIN_SB_TX, PIN_SB_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+        }
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "scoreboard UART setup failed (%s): output off", esp_err_to_name(err));
+        return;
     }
 
     // Second channel: open it with the same line settings and leave it idle.
     const uart_port_t port2 = static_cast<uart_port_t>(SB2_UART_NUM);
-    ESP_ERROR_CHECK(uart_driver_install(port2, 256, 256, 0, nullptr, 0));
-    ESP_ERROR_CHECK(uart_param_config(port2, &cfg));
-    ESP_ERROR_CHECK(uart_set_pin(port2, PIN_SB2_TX, PIN_SB2_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    err = uart_driver_install(port2, 256, 256, 0, nullptr, 0);
+    if (err == ESP_OK) err = uart_param_config(port2, &cfg);
+    if (err == ESP_OK) err = uart_set_pin(port2, PIN_SB2_TX, PIN_SB2_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    if (err != ESP_OK) ESP_LOGW(TAG, "second serial channel setup failed: %s", esp_err_to_name(err));
 
-    ESP_LOGW(TAG, "scoreboard output running (EZ2000 frame, UNVERIFIED digit mapping) at %u baud, 7E1", (unsigned)s.sb_baud);
-    xTaskCreate(scoreboard_task, "scoreboard", 3072, nullptr, 4, nullptr);
+    if (xTaskCreate(scoreboard_task, "scoreboard", 3072, nullptr, 4, nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "could not start the scoreboard task");
+        return;
+    }
+    ESP_LOGW(TAG, "scoreboard output running (EZ2000 frame, UNVERIFIED digit mapping) at %u baud, 7E1",
+             static_cast<unsigned>(s.sb_baud));
 }

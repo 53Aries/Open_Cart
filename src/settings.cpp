@@ -1,6 +1,7 @@
 // Open_Cart
 #include "settings.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include "esp_log.h"
@@ -9,8 +10,14 @@
 #include "nvs_flash.h"
 
 static const char* TAG = "settings";
-static const char* NS = "scale";
 static const char* KEY = "cfg";
+static const char* KEY_CELLS = "cells";
+
+static constexpr uint32_t kDefaultBaud = 1200;          // Digi-Star standard (9600 when the indicator's SCOREM = 4)
+static constexpr uint32_t kMinBaud = 300;
+static constexpr uint32_t kMaxBaud = 115200;
+static constexpr uint16_t kDefaultIntervalMs = 250;
+static constexpr uint16_t kMinIntervalMs = 50;
 
 void settings_defaults(Settings* s) {
     std::memset(s, 0, sizeof(*s));
@@ -30,40 +37,47 @@ void settings_defaults(Settings* s) {
     s->tare_lb = 0.0;
     s->n_cal = 0;
 
-    s->sb_baud = 1200;             // Digi-Star standard (9600 when the indicator's SCOREM = 4)
-    s->sb_interval_ms = 250;
+    s->sb_baud = kDefaultBaud;
+    s->sb_interval_ms = kDefaultIntervalMs;
     s->sb_use_rs485 = 0;
 }
 
 bool settings_load(Settings* s) {
     settings_defaults(s);
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return false;
+    if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) return false;
     Settings tmp;
     size_t len = sizeof(tmp);
     esp_err_t err = nvs_get_blob(h, KEY, &tmp, &len);
     nvs_close(h);
     if (err != ESP_OK || len != sizeof(tmp) || tmp.version != SETTINGS_VERSION) {
-        ESP_LOGW(TAG, "no valid saved settings (err=%d len=%u), using defaults", (int)err, (unsigned)len);
+        ESP_LOGW(TAG, "no valid saved settings (%s, len=%u), using defaults", esp_err_to_name(err), static_cast<unsigned>(len));
         return false;
     }
-    // Make sure strings are terminated and counts are sane even if the blob is damaged.
+    // Make sure strings are terminated and values are sane even if the blob is damaged. Each bad
+    // value is replaced on its own; calibration points are checked by Scale::set_calibration().
     tmp.ap_ssid[sizeof(tmp.ap_ssid) - 1] = 0;
     tmp.ap_password[sizeof(tmp.ap_password) - 1] = 0;
     if (tmp.n_cal > MAX_CAL_POINTS) tmp.n_cal = 0;
-    if (tmp.filter_samples < 1 || tmp.filter_samples > Scale::kMaxWindow) tmp.filter_samples = DEFAULT_FILTER_SAMPLES;
-    if (tmp.display_increment_lb <= 0) tmp.display_increment_lb = DEFAULT_DISPLAY_INCREMENT_LB;
+    if (!filter_samples_ok(tmp.filter_samples)) tmp.filter_samples = DEFAULT_FILTER_SAMPLES;
+    if (!display_increment_ok(tmp.display_increment_lb)) tmp.display_increment_lb = DEFAULT_DISPLAY_INCREMENT_LB;
+    if (!std::isfinite(tmp.motion_threshold_lb) || tmp.motion_threshold_lb < 0) tmp.motion_threshold_lb = DEFAULT_MOTION_THRESHOLD_LB;
+    if (!std::isfinite(tmp.tare_lb)) tmp.tare_lb = 0.0;
+    if (tmp.sb_baud < kMinBaud || tmp.sb_baud > kMaxBaud) tmp.sb_baud = kDefaultBaud;
+    if (tmp.sb_interval_ms < kMinIntervalMs) tmp.sb_interval_ms = kDefaultIntervalMs;
     *s = tmp;
     return true;
 }
 
 bool settings_save(const Settings& s) {
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
-    esp_err_t err = nvs_set_blob(h, KEY, &s, sizeof(s));
-    if (err == ESP_OK) err = nvs_commit(h);
-    nvs_close(h);
-    if (err != ESP_OK) ESP_LOGE(TAG, "save failed: %d", (int)err);
+    esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(h, KEY, &s, sizeof(s));
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    if (err != ESP_OK) ESP_LOGE(TAG, "save failed: %s", esp_err_to_name(err));
     return err == ESP_OK;
 }
 
@@ -72,14 +86,15 @@ struct CellBlob {
     uint32_t version;
     CellConfig cfg;
 };
+static_assert(sizeof(CellBlob) == 16, "CellBlob layout changed: saved load cell setup would be lost");
 static constexpr uint32_t kCellVersion = 1;
 
 CellConfig cells_load() {
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return CellConfig::defaults();
+    if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) return CellConfig::defaults();
     CellBlob b;
     size_t len = sizeof(b);
-    esp_err_t err = nvs_get_blob(h, "cells", &b, &len);
+    esp_err_t err = nvs_get_blob(h, KEY_CELLS, &b, &len);
     nvs_close(h);
     if (err != ESP_OK || len != sizeof(b) || b.version != kCellVersion || !b.cfg.valid()) return CellConfig::defaults();
     return b.cfg;
@@ -87,10 +102,13 @@ CellConfig cells_load() {
 
 bool cells_save(const CellConfig& c) {
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
-    CellBlob b{kCellVersion, c};
-    esp_err_t err = nvs_set_blob(h, "cells", &b, sizeof(b));
-    if (err == ESP_OK) err = nvs_commit(h);
-    nvs_close(h);
+    esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        CellBlob b{kCellVersion, c};
+        err = nvs_set_blob(h, KEY_CELLS, &b, sizeof(b));
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    if (err != ESP_OK) ESP_LOGE(TAG, "load cell save failed: %s", esp_err_to_name(err));
     return err == ESP_OK;
 }

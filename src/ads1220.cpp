@@ -32,7 +32,8 @@ esp_err_t ADS1220::begin() {
     drdy.pin_bit_mask = 1ULL << PIN_ADS_DRDY;
     drdy.mode = GPIO_MODE_INPUT;
     drdy.pull_up_en = GPIO_PULLUP_ENABLE;
-    ESP_ERROR_CHECK(gpio_config(&drdy));
+    esp_err_t err = gpio_config(&drdy);
+    if (err != ESP_OK) return err;
 
     spi_bus_config_t bus{};
     bus.mosi_io_num = PIN_ADS_MOSI;
@@ -41,37 +42,51 @@ esp_err_t ADS1220::begin() {
     bus.quadwp_io_num = -1;
     bus.quadhd_io_num = -1;
     bus.max_transfer_sz = 8;
-    esp_err_t err = spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_DISABLED);
+    err = spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_DISABLED);
     if (err != ESP_OK) return err;
+    bus_ = true;
 
     spi_device_interface_config_t dev{};
     dev.mode = 1;                       // CPOL=0, CPHA=1
     dev.clock_speed_hz = ADS_SPI_HZ;
     dev.spics_io_num = PIN_ADS_CS;
     dev.queue_size = 2;
-    spi_device_handle_t h;
-    err = spi_bus_add_device(SPI2_HOST, &dev, &h);
-    if (err != ESP_OK) return err;
-    dev_ = h;
+    err = spi_bus_add_device(SPI2_HOST, &dev, &dev_);
+    if (err == ESP_OK) err = configure();
+    if (err != ESP_OK) release_bus();
+    return err;
+}
 
-    err = command(CMD_RESET);
+esp_err_t ADS1220::configure() {
+    esp_err_t err = command(CMD_RESET);
     if (err != ESP_OK) return err;
     vTaskDelay(pdMS_TO_TICKS(5));       // reset takes a few hundred microseconds; be generous
 
-    const uint8_t regs[4] = {REG0, REG1, REG2, REG3};
-    err = write_regs(regs, 4);
+    const uint8_t regs[kNumRegs] = {REG0, REG1, REG2, REG3};
+    err = write_regs(regs, kNumRegs);
     if (err != ESP_OK) return err;
 
-    uint8_t back[4] = {};
-    err = read_regs(back, 4);
+    uint8_t back[kNumRegs] = {};
+    err = read_regs(back, kNumRegs);
     if (err != ESP_OK) return err;
-    if (std::memcmp(regs, back, 4) != 0) {
+    if (std::memcmp(regs, back, kNumRegs) != 0) {
         ESP_LOGE(TAG, "register readback mismatch: %02x %02x %02x %02x", back[0], back[1], back[2], back[3]);
         return ESP_FAIL;
     }
 
     // Measure the ADC offset first (also leaves the device converting continuously on the bridge).
     return calibrate_offset();
+}
+
+void ADS1220::release_bus() {
+    if (dev_) {
+        spi_bus_remove_device(dev_);
+        dev_ = nullptr;
+    }
+    if (bus_) {
+        spi_bus_free(SPI2_HOST);
+        bus_ = false;
+    }
 }
 
 bool ADS1220::wait_drdy(int timeout_ms) const {
@@ -128,28 +143,30 @@ esp_err_t ADS1220::command(uint8_t cmd) {
     t.length = 8;
     t.flags = SPI_TRANS_USE_TXDATA;
     t.tx_data[0] = cmd;
-    return spi_device_polling_transmit(static_cast<spi_device_handle_t>(dev_), &t);
+    return spi_device_polling_transmit(dev_, &t);
 }
 
 esp_err_t ADS1220::write_regs(const uint8_t* regs, size_t n) {
-    uint8_t tx[5];
-    tx[0] = CMD_WREG | ((n - 1) & 0x3);   // starting at register 0
+    if (n < 1 || n > kNumRegs) return ESP_ERR_INVALID_ARG;
+    uint8_t tx[kNumRegs + 1];
+    tx[0] = static_cast<uint8_t>(CMD_WREG | ((n - 1) & 0x3));   // starting at register 0
     std::memcpy(tx + 1, regs, n);
     spi_transaction_t t{};
     t.length = 8 * (n + 1);
     t.tx_buffer = tx;
-    return spi_device_polling_transmit(static_cast<spi_device_handle_t>(dev_), &t);
+    return spi_device_polling_transmit(dev_, &t);
 }
 
 esp_err_t ADS1220::read_regs(uint8_t* regs, size_t n) {
-    uint8_t tx[5] = {};
-    uint8_t rx[5] = {};
-    tx[0] = CMD_RREG | ((n - 1) & 0x3);
+    if (n < 1 || n > kNumRegs) return ESP_ERR_INVALID_ARG;
+    uint8_t tx[kNumRegs + 1] = {};
+    uint8_t rx[kNumRegs + 1] = {};
+    tx[0] = static_cast<uint8_t>(CMD_RREG | ((n - 1) & 0x3));
     spi_transaction_t t{};
     t.length = 8 * (n + 1);
     t.tx_buffer = tx;
     t.rx_buffer = rx;
-    esp_err_t err = spi_device_polling_transmit(static_cast<spi_device_handle_t>(dev_), &t);
+    esp_err_t err = spi_device_polling_transmit(dev_, &t);
     if (err == ESP_OK) std::memcpy(regs, rx + 1, n);
     return err;
 }
@@ -168,7 +185,7 @@ esp_err_t ADS1220::read_raw(int32_t* out) {
     t.length = 32;
     t.tx_buffer = tx;
     t.rx_buffer = rx;
-    esp_err_t err = spi_device_polling_transmit(static_cast<spi_device_handle_t>(dev_), &t);
+    esp_err_t err = spi_device_polling_transmit(dev_, &t);
     if (err != ESP_OK) return err;
     int32_t v = (static_cast<int32_t>(rx[1]) << 16) | (static_cast<int32_t>(rx[2]) << 8) | rx[3];
     if (v & 0x800000) v -= 0x1000000;   // sign-extend 24-bit two's complement

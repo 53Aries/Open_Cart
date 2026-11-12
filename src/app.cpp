@@ -1,8 +1,15 @@
 // Open_Cart
 #include "app.h"
+
 #include "unload_log.h"
 
 App g_app;
+
+bool app_init() {
+    g_app.lock = xSemaphoreCreateMutex();
+    g_app.save_lock = xSemaphoreCreateMutex();
+    return g_app.lock && g_app.save_lock;
+}
 
 bool app_toggle_unload() {
     UnloadTracker::Event ev;
@@ -21,7 +28,7 @@ Snapshot app_snapshot() {
     Snapshot s{};
     s.gross_lb = g_app.scale.gross_lb();
     s.tare_lb = g_app.scale.tare_lb();
-    s.net_lb = s.gross_lb - s.tare_lb;
+    s.net_lb = g_app.scale.net_lb();
     s.display_lb = g_app.scale.display_lb();
     s.raw = g_app.scale.filtered_raw();
     s.last_raw = g_app.last_raw;
@@ -40,24 +47,34 @@ Snapshot app_snapshot() {
     return s;
 }
 
-void app_persist_scale() {
+bool app_persist_scale() {
+    SaveLock save;
     Settings copy;
     {
         AppLock l;
         CalPoint pts[MAX_CAL_POINTS];
-        size_t n = g_app.scale.get_calibration(pts, MAX_CAL_POINTS);
+        const size_t n = g_app.scale.get_calibration(pts, MAX_CAL_POINTS);
         g_app.settings.n_cal = static_cast<uint8_t>(n);
         for (size_t i = 0; i < n; ++i) g_app.settings.cal[i] = pts[i];
         g_app.settings.tare_lb = g_app.scale.tare_lb();
         copy = g_app.settings;
     }
-    settings_save(copy);   // flash write happens outside the lock
+    return settings_save(copy);   // flash write happens outside AppLock
 }
 
-void app_save_settings(const Settings& s) {
-    {
-        AppLock l;
-        g_app.settings = s;
-    }
-    settings_save(s);
+bool app_save_cells(const CellConfig& c) {
+    SaveLock save;
+    if (!cells_save(c)) return false;
+    AppLock l;
+    g_app.cells = c;
+    g_app.scale.set_nominal_counts_per_lb(Scale::nominal_slope(c));
+    return true;
+}
+
+bool app_save_unload_cfg(const UnloadConfig& c) {
+    SaveLock save;
+    if (!unload_cfg_save(c)) return false;
+    AppLock l;
+    g_app.unload.configure(c);
+    return true;
 }

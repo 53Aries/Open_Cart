@@ -1,7 +1,6 @@
 // Open_Cart
 // Host-side tests for the pure scale logic. Build and run:
 //   g++ -std=c++17 -I src -o /tmp/test_scale test/test_scale.cpp src/scale.cpp && /tmp/test_scale
-#include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -13,9 +12,9 @@ static int g_fail = 0;
 // Simulated ADC: offset + counts_per_lb * weight + noise
 static double g_offset = 12345.0;
 static double g_cpl = 10.737;   // counts per lb (nominal)
-static double noise(double amp) { return (std::rand() / (double)RAND_MAX - 0.5) * 2.0 * amp; }
+static double noise(double amp) { return (std::rand() / static_cast<double>(RAND_MAX) - 0.5) * 2.0 * amp; }
 static void feed(Scale& s, double lb, int n, double noise_counts = 20.0) {
-    for (int i = 0; i < n; ++i) s.push_raw((int32_t)std::lround(g_offset + g_cpl * lb + noise(noise_counts)));
+    for (int i = 0; i < n; ++i) s.push_raw(static_cast<int32_t>(std::lround(g_offset + g_cpl * lb + noise(noise_counts))));
 }
 
 int main() {
@@ -164,6 +163,22 @@ int main() {
         CHECK(!e.add_cal_from_reading(100.0, 100.0));
         CHECK(!c.add_cal_from_reading(20000.0, 5000.0));
         CHECK(!c.add_cal_from_reading(std::nan(""), 5.0));
+    }
+
+    // Non-finite known weights are rejected and leave the calibration alone
+    {
+        Scale n;
+        n.configure(5, 1.0, 15.0);
+        feed(n, 0.0, 6, 0.0);
+        CHECK(n.add_cal_point(0.0));
+        CHECK(!n.add_cal_point(std::nan("")));
+        CHECK(!n.add_cal_point(INFINITY));
+        CHECK(n.cal_count() == 1);
+        CHECK(std::isfinite(n.gross_lb()));
+        // set_calibration drops non-finite points (as from a damaged settings blob) and keeps the rest
+        const CalPoint pts[] = {{1000.0, 0.0}, {std::nan(""), 500.0}, {1000.0 + 10.737 * 20000.0, 20000.0}};
+        n.set_calibration(pts, 3);
+        CHECK(n.cal_count() == 2);
     }
 
     if (g_fail == 0) std::printf("ALL TESTS PASSED\n");
