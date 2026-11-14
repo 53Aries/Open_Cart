@@ -26,6 +26,11 @@ static constexpr uint8_t REG1 = (0x0 << 5) | (0x0 << 3) | (1 << 2);
 static constexpr uint8_t REG2 = (0x3 << 6) | (0x1 << 4);
 // Register 3: IDAC routing off, DRDYM=0
 static constexpr uint8_t REG3 = 0x00;
+static constexpr uint8_t kConfig[4] = {REG0, REG1, REG2, REG3};
+
+// Temperature sensor mode (TS bit). The chip ignores register 0 and uses its internal reference.
+static constexpr uint8_t REG1_TS = REG1 | (1 << 1);
+static constexpr double kTempLsb = 0.03125;       // degC per LSB of the 14-bit result
 
 esp_err_t ADS1220::begin() {
     gpio_config_t drdy{};
@@ -52,9 +57,12 @@ esp_err_t ADS1220::begin() {
     dev.spics_io_num = PIN_ADS_CS;
     dev.queue_size = 2;
     err = spi_bus_add_device(SPI2_HOST, &dev, &dev_);
-    if (err == ESP_OK) err = configure();
-    if (err != ESP_OK) release_bus();
-    return err;
+    if (err != ESP_OK) {
+        release_bus();
+        return err;
+    }
+    // If the chip does not answer, the SPI bus stays set up so recover() can keep trying.
+    return configure();
 }
 
 esp_err_t ADS1220::configure() {
@@ -62,14 +70,13 @@ esp_err_t ADS1220::configure() {
     if (err != ESP_OK) return err;
     vTaskDelay(pdMS_TO_TICKS(5));       // reset takes a few hundred microseconds; be generous
 
-    const uint8_t regs[kNumRegs] = {REG0, REG1, REG2, REG3};
-    err = write_regs(regs, kNumRegs);
+    err = write_regs(kConfig, kNumRegs);
     if (err != ESP_OK) return err;
 
     uint8_t back[kNumRegs] = {};
     err = read_regs(back, kNumRegs);
     if (err != ESP_OK) return err;
-    if (std::memcmp(regs, back, kNumRegs) != 0) {
+    if (std::memcmp(kConfig, back, kNumRegs) != 0) {
         ESP_LOGE(TAG, "register readback mismatch: %02x %02x %02x %02x", back[0], back[1], back[2], back[3]);
         return ESP_FAIL;
     }
@@ -136,6 +143,46 @@ esp_err_t ADS1220::calibrate_offset(int samples) {
     return command(CMD_START);          // restart continuous conversions on the bridge
 }
 
+bool ADS1220::config_ok() {
+    uint8_t back[kNumRegs] = {};
+    if (read_regs(back, kNumRegs) != ESP_OK) return false;
+    return std::memcmp(kConfig, back, kNumRegs) == 0;
+}
+
+esp_err_t ADS1220::convert(int discard, int32_t* out) {
+    esp_err_t err = command(CMD_START);   // resets the digital filter: the next result is settled
+    if (err != ESP_OK) return err;
+    for (int i = 0; i <= discard; ++i) {
+        if (!wait_drdy(200)) return ESP_ERR_TIMEOUT;
+        err = read_raw(out);
+        if (err != ESP_OK) return err;
+    }
+    return ESP_OK;
+}
+
+// Temperature, then back to the bridge. Called right after a bridge sample was read, so no result
+// is waiting and the next DRDY belongs to the new setting. Writing a register restarts the
+// conversion in progress; START then resets the filter (one-cycle settling).
+esp_err_t ADS1220::read_temperature(float* temp_c) {
+    int32_t t = 0, scrap = 0;
+    // The first temperature result is dropped in case the internal reference needs time to settle.
+    esp_err_t err = write_reg(1, REG1_TS);
+    if (err == ESP_OK) err = convert(1, &t);
+
+    // Always restore the bridge setting, even after an error. The first bridge result after the
+    // switch is dropped (input filter capacitors and PGA recovering).
+    esp_err_t back = write_reg(0, REG0);
+    if (back == ESP_OK) back = write_reg(1, REG1);
+    if (back == ESP_OK) back = convert(0, &scrap);
+    if (err == ESP_OK) err = back;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "temperature reading failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    *temp_c = static_cast<float>((t >> 10) * kTempLsb);   // 14-bit two's complement, left-justified
+    return ESP_OK;
+}
+
 bool ADS1220::data_ready() const { return gpio_get_level(static_cast<gpio_num_t>(PIN_ADS_DRDY)) == 0; }
 
 esp_err_t ADS1220::command(uint8_t cmd) {
@@ -154,6 +201,16 @@ esp_err_t ADS1220::write_regs(const uint8_t* regs, size_t n) {
     spi_transaction_t t{};
     t.length = 8 * (n + 1);
     t.tx_buffer = tx;
+    return spi_device_polling_transmit(dev_, &t);
+}
+
+esp_err_t ADS1220::write_reg(uint8_t addr, uint8_t value) {
+    if (addr >= kNumRegs) return ESP_ERR_INVALID_ARG;
+    spi_transaction_t t{};
+    t.length = 16;
+    t.flags = SPI_TRANS_USE_TXDATA;
+    t.tx_data[0] = static_cast<uint8_t>(CMD_WREG | (addr << 2));   // nn = 00: one register
+    t.tx_data[1] = value;
     return spi_device_polling_transmit(dev_, &t);
 }
 

@@ -9,6 +9,17 @@
 #include "settings.h"
 #include "unload.h"
 
+// ADS1220 health, written by the sample task (see main.cpp).
+struct AdcHealth {
+    bool temp_valid = false;      // temp_c holds a real measurement
+    float temp_c = 0;             // ADC chip temperature (board temperature, roughly)
+    int32_t offset = 0;           // ADC offset in counts (subtracted from every reading)
+    bool offset_temp_valid = false;
+    float offset_temp_c = 0;      // chip temperature when the offset was last measured
+    uint32_t offset_recals = 0;   // offset re-measured because the temperature moved
+    uint32_t recoveries = 0;      // ADC reset and reconfigured (lost registers or stopped)
+};
+
 struct App {
     Scale scale;
     Settings settings;
@@ -16,8 +27,10 @@ struct App {
     SemaphoreHandle_t save_lock = nullptr;   // serializes settings/cal flash writes (see app_update_settings)
     int32_t last_raw = 0;
     uint32_t sample_count = 0;
+    TickType_t last_sample_tick = 0;         // when the sample task last fed the filter
     UnloadTracker unload;
     CellConfig cells = CellConfig::defaults();
+    AdcHealth adc;
 };
 
 extern App g_app;
@@ -58,12 +71,14 @@ struct Snapshot {
     bool approximate;
     bool has_cal;
     bool ready;
+    bool stale;            // no new ADC sample for ADC_STALE_MS: the weight is frozen, do not show it as live
     bool unloading;
     bool unload_manual;
     bool unload_auto;
     double unload_running_lb;
     bool has_last_unload;
     double last_unload_lb;
+    AdcHealth adc;
 };
 
 Snapshot app_snapshot();

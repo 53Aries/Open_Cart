@@ -483,7 +483,8 @@ void show_home(const Snapshot& s) {
 
     std::string st;
     auto add = [&st](const char* t) { if (!st.empty()) st += "  |  "; st += t; };
-    if (!s.ready) add("warming up");
+    if (s.stale) add("NO DATA FROM ADC");
+    else if (!s.ready) add("warming up");
     else if (!s.has_cal) add("NOT CALIBRATED");
     else if (s.approximate) add("approximate (zero only)");
     if (s.motion) add("MOTION");

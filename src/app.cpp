@@ -38,12 +38,14 @@ Snapshot app_snapshot() {
     s.approximate = g_app.scale.is_approximate();
     s.has_cal = g_app.scale.has_calibration();
     s.ready = g_app.scale.ready();
+    s.stale = xTaskGetTickCount() - g_app.last_sample_tick > pdMS_TO_TICKS(ADC_STALE_MS);
     s.unloading = g_app.unload.showing();
     s.unload_manual = g_app.unload.manual();
     s.unload_auto = g_app.unload.auto_enabled();
     s.unload_running_lb = g_app.unload.running_lb();
     s.has_last_unload = g_app.unload.has_last();
     s.last_unload_lb = g_app.unload.last_lb();
+    s.adc = g_app.adc;
     return s;
 }
 

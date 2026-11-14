@@ -151,9 +151,10 @@ traces don't cross.
   datasheet). `begin()` measures the ADC offset (MUX 1110b, inputs shorted to mid-supply, 20 readings),
   and `read()` subtracts it. This removes the ADC offset (typ +/-4 uV, about 80 lb) but not the load cell
   zero, so tare still applies. Offset drift is 0.08-0.3 uV/degC (about 2-6 lb per degC); call
-  `calibrate_offset()` again if you want to re-zero the ADC. Any calibration saved before this change would be
+  `calibrate_offset()` again if you want to re-zero the ADC (the firmware now does this itself when the chip temperature moves 3 degC, see "ADC health"). Any calibration saved before this change would be
   off by the board offset (none exist yet). Builds clean for the `s3` env, but has never run with an ADS1220 attached. The register setup also enables 50/60 Hz rejection (reg 2 = D0h). If the
-  register readback does not match, init fails and the status LED goes solid red (see "Firmware").
+  register readback does not match, init fails, the LED blinks red and the firmware retries every second (see
+  "ADC health" under "Firmware").
 
 ## Scoreboard (Agri-Tronix 2906-0409, 4" LED)
 
@@ -331,7 +332,28 @@ total, time and the current field name in a ring of 1500 records in the `unloads
 so the web page sends its clock. When the ring is full the page makes the user choose before the oldest records are
 overwritten. Fields (up to 50 saved names) keep a running total; history exports as CSV. All thresholds are on the page.
 
-**Status LED.** Red solid: ADC failed to start. Red blinking: no new sample for 2 s. Orange: filter still filling.
+**ADC health (`main.cpp` sample task, `ads1220.cpp`).** All ADC access stays in the sample task.
+- After every sample the registers are read back. If they no longer match (chip reset by a brown-out or ESD, which
+  puts it back to single-shot, AIN0/AIN1, gain 1), the sample is dropped and the chip is reset and reconfigured. The
+  same happens if no sample arrives for 1 s. Without this a reset ADC stopped the scale until power was cycled.
+  This also covers start-up: if the chip does not answer at power-up (late supply, loose connector, a glitch), the
+  SPI bus stays set up, the sample task starts anyway and keeps retrying every second; the scale comes up by itself
+  once the chip answers. Retries are logged at first, then every 60th. Only a failure to set up the SPI bus itself
+  (a firmware or pin problem) is final.
+  Register reads happen only right after a sample is read, because SPI clocks set DRDY high (a waiting sample would
+  be lost).
+- Every 30 s (`ADC_TEMP_INTERVAL_MS`) the chip temperature is read (TS = 1; register 0 is ignored and the internal
+  reference used meanwhile, SBAS501D 8.3.13), then the bridge setting is restored and its first result dropped:
+  about 150 ms without bridge samples.
+- When the chip temperature has moved 3 degC (`ADC_OFFSET_RECAL_C`) since the last offset measurement, the ADC
+  offset is measured again (inputs shorted, ~1 s), unless the weight is in motion or an unload is in progress.
+  ADC offset drift is 2-6 lb per degC at gain 128; this removes it. The reading shifts by the drift removed. Load
+  cell zero drift and cable gain drift are not corrected.
+- Not done, on purpose: an excitation check with the (AVDD - AVSS)/4 monitor (TI calls it coarse, and the reading is
+  ratiometric, so it would only catch faults that already show as a dead reading), and a drift log.
+
+**Status LED.** Red solid: ADC SPI bus could not be set up. Red blinking: no new sample for 2 s, including an ADC
+that has not answered since power-up (the firmware keeps resetting it meanwhile). Orange: filter still filling.
 Cyan: running but uncalibrated or approximate. Green: calibrated. Green or cyan blinks off while the cart is in motion.
 
 **Wi-Fi web page (`web_server.cpp`).** Access point `Open_Cart-xxxx`, WPA2, default password in `config.h`
@@ -346,6 +368,12 @@ leading `-` marks a negative weight, and the last character becomes `-` while in
 sent. The layout matches a capture from a real EZ2000 (see "Scoreboard"); not yet tried on the Agri-Tronix display.
 UART2 is opened and left idle.
 RS-485 mode (DE on GPIO8) exists in firmware but is not part of the board design.
+The task runs at priority 1, the lowest of the app tasks, so it never delays the ADC sample task (6) or unload
+detection (3). ADC error (no sample for 2 s, `ADC_STALE_MS`, including an ADC that never answered at power-up):
+the frame is all zeros, `<stx>000000<cr>`, so the display never keeps a frozen weight; a real 0 lb reading is
+`<stx>     0<cr>`. The web page and ISOBUS show "no data from the ADC" then. While the filter warms up at power-on
+no frames are sent. Still to check on the Agri-Tronix display: that it shows `000000` (and does not blank
+leading zeros, which would make it look like a real 0).
 
 **ISOBUS (`isobus_vt.cpp`).** Separate build (`pio run -e s3_isobus`), off by default, TWAI at 250 kbit/s accepting all
 frames, AgIsoStack++ VT client with five tabs. Built but never run against a VT or the S3 TWAI plugin.

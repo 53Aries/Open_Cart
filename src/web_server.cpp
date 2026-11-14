@@ -141,6 +141,13 @@ a full calibration overrides it. If you change the real cells, re-calibrate.</sm
 </div>
 
 <div class="card">
+<h2>ADC</h2>
+<div><small id="hl">checking...</small></div>
+<small>The ADC reads its own temperature every 30 seconds and re-measures its offset when the temperature
+moves 3 °C (5 °F) or more, so the zero stays put as the day warms up.</small>
+</div>
+
+<div class="card">
 <h2>Settings</h2>
 <small>Output changes take effect after a restart.</small>
 <label><input type="checkbox" id="e_web"> Wi-Fi web page</label>
@@ -195,9 +202,10 @@ async function addcal(){const j=await post('/api/cal/add','lb='+encodeURICompone
 async function tick(){
  try{
   const j=await (await fetch('/api/state',{cache:'no-store'})).json();
-  $('wt').textContent=j.ready?j.display.toFixed(0):'--';
+  $('wt').textContent=j.ready&&!j.stale?j.display.toFixed(0):'--';
   let s=[];
-  if(!j.ready)s.push('warming up');
+  if(j.stale)s.push('<b>no data from the ADC</b>');
+  else if(!j.ready)s.push('warming up');
   else if(!j.has_cal)s.push('<b>not calibrated</b>');
   else if(j.approx)s.push('<b>approximate (zero only)</b>');
   if(j.motion)s.push('<b>motion</b>');
@@ -215,6 +223,7 @@ async function tick(){
   if(j.ul_seq!==lastseq){lastseq=j.ul_seq;if(cur==='unl')loadhist();}
   $('tareinfo').textContent='tare: '+j.tare.toFixed(0)+' lb · gross: '+j.gross.toFixed(0)+' lb';
   $('raw').textContent='raw counts: '+j.raw.toFixed(0)+' · calibration points: '+j.n_cal;
+  $('hl').textContent=(j.tv?'Temperature '+j.tc.toFixed(1)+' °C ('+(j.tc*1.8+32).toFixed(0)+' °F) · ':'')+'offset '+j.off+' counts, re-measured '+j.orc+' times · resets: '+j.rec;
   const c=await (await fetch('/api/cal',{cache:'no-store'})).json();
   $('cal').innerHTML=c.points.length?c.points.map(p=>'<div>'+p.lb.toFixed(1)+' lb &rarr; '+p.raw.toFixed(0)+' counts</div>').join(''):'<small>no points</small>';
  }catch(e){$('st').textContent='connection lost';}
@@ -457,15 +466,18 @@ static esp_err_t h_state(httpd_req_t* req) {
     uint32_t h_count = 0, h_pend = 0;
     bool h_need = false;
     unload_log_status(&h_count, &h_need, &h_pend);
-    char buf[640];
+    char buf[896];
     std::snprintf(buf, sizeof(buf),
-        "{\"ul_man\":%s,\"ul_auto\":%s,\"display\":%.1f,\"net\":%.1f,\"gross\":%.1f,\"tare\":%.1f,\"raw\":%.1f,"
-        "\"n_cal\":%u,\"motion\":%s,\"approx\":%s,\"has_cal\":%s,\"ready\":%s,"
+        "{\"tv\":%s,\"tc\":%.2f,\"off\":%ld,\"orc\":%u,\"rec\":%u,"
+        "\"ul_man\":%s,\"ul_auto\":%s,\"display\":%.1f,\"net\":%.1f,\"gross\":%.1f,\"tare\":%.1f,\"raw\":%.1f,"
+        "\"n_cal\":%u,\"motion\":%s,\"approx\":%s,\"has_cal\":%s,\"ready\":%s,\"stale\":%s,"
         "\"ul_act\":%s,\"ul_run\":%.1f,\"ul_has\":%s,\"ul_last\":%.1f,\"ul_seq\":%u,\"ft\":%.1f,\"fn\":%u,\"hc\":%u,\"hcap\":%d,\"hneed\":%s,\"hp\":%u}",
+        s.adc.temp_valid ? "true" : "false", s.adc.temp_c,
+        static_cast<long>(s.adc.offset), static_cast<unsigned>(s.adc.offset_recals), static_cast<unsigned>(s.adc.recoveries),
         s.unload_manual ? "true" : "false", s.unload_auto ? "true" : "false",
         s.display_lb, s.net_lb, s.gross_lb, s.tare_lb, s.raw, static_cast<unsigned>(s.n_cal),
         s.motion ? "true" : "false", s.approximate ? "true" : "false",
-        s.has_cal ? "true" : "false", s.ready ? "true" : "false",
+        s.has_cal ? "true" : "false", s.ready ? "true" : "false", s.stale ? "true" : "false",
         s.unloading ? "true" : "false", s.unload_running_lb, s.has_last_unload ? "true" : "false",
         s.last_unload_lb, static_cast<unsigned>(unload_log_newest_seq()), ft_lb, static_cast<unsigned>(ft_n),
         static_cast<unsigned>(h_count), UNLOAD_LOG_CAPACITY, h_need ? "true" : "false", static_cast<unsigned>(h_pend));

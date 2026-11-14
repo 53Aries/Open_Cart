@@ -25,7 +25,16 @@ static const char* TAG = "scoreboard";
 static constexpr bool SB_SEND_MOTION_FLAG = true;
 
 size_t scoreboard_format(char* buf, size_t cap, const Snapshot& snap) {
-    if (!snap.ready || cap < 8) return 0;
+    if (cap < 8) return 0;
+    buf[0] = 0x02;                       // <stx>
+    buf[7] = 0x0D;                       // <cr>
+    // ADC error (no sample for ADC_STALE_MS, including an ADC that never answered): send all zeros so the
+    // display never keeps a frozen weight. A real 0 lb reading is "     0" (leading spaces), so it differs.
+    if (snap.stale) {
+        std::memset(buf + 1, '0', 6);
+        return 8;
+    }
+    if (!snap.ready) return 0;           // normal warm-up at power-on: nothing yet
     long w = std::lround(snap.display_lb);
     const bool neg = w < 0;
     if (neg) w = -w;
@@ -37,9 +46,7 @@ size_t scoreboard_format(char* buf, size_t cap, const Snapshot& snap) {
     else     std::snprintf(digits, sizeof(digits), "%6ld", w);    // 6 digits right-justified
     if (SB_SEND_MOTION_FLAG && snap.motion) digits[5] = '-';       // D = motion
 
-    buf[0] = 0x02;                       // <stx>
     std::memcpy(buf + 1, digits, 6);     // A BBB C D
-    buf[7] = 0x0D;                       // <cr>
     return 8;
 }
 
@@ -94,7 +101,8 @@ void scoreboard_start() {
     if (err == ESP_OK) err = uart_set_pin(port2, PIN_SB2_TX, PIN_SB2_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     if (err != ESP_OK) ESP_LOGW(TAG, "second serial channel setup failed: %s", esp_err_to_name(err));
 
-    if (xTaskCreate(scoreboard_task, "scoreboard", 3072, nullptr, 4, nullptr) != pdPASS) {
+    // Lowest app priority: below the ADC sample task (6), unload detection (3) and the LED (2).
+    if (xTaskCreate(scoreboard_task, "scoreboard", 3072, nullptr, 1, nullptr) != pdPASS) {
         ESP_LOGE(TAG, "could not start the scoreboard task");
         return;
     }

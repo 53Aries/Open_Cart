@@ -65,5 +65,16 @@
 #define DEFAULT_UNLOAD_MIN_LB         250.0   // smaller drops are not logged
 #define UNLOAD_LOG_CAPACITY           1500   // records kept; oldest overwritten (see partitions.csv)
 
+// ADS1220 health (see ads1220.h). Each temperature reading pauses the bridge readings for about 150 ms.
+#define ADC_TEMP_INTERVAL_MS      30000   // chip temperature reading
+// Re-measure the ADC offset (inputs shorted, ~1 s) when the chip temperature has moved this far
+// since the last measurement. ADC offset drift is about 2-6 lb per degC at gain 128 (DESIGN.md).
+// Skipped while the weight is in motion or an unload is in progress. 0 = never.
+#define ADC_OFFSET_RECAL_C        3.0
+#define ADC_STALL_MS              1000    // no sample for this long (normally 50 ms): reset the ADC
+// No sample for this long: outputs stop showing the weight as live (scoreboard stops sending). Longer than
+// the scale's own pauses (temperature 0.15 s, offset re-measurement ~1.2 s).
+#define ADC_STALE_MS              2000
+
 // Max calibration points kept (piecewise linear)
 #define MAX_CAL_POINTS 8
