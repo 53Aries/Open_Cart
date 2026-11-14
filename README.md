@@ -4,7 +4,7 @@ Reads a bridge-type load cell scale (designed around five Digi-Star 3.5 DB-30 EZ
 through a passive junction box) and shows the weight on:
 
 - a Wi-Fi web page served by the ESP32 itself (default on; works on an iPad, no internet needed)
-- a serial scoreboard output (default **off**; sends the Digi-Star EZ2000 frame at 1200 baud 7E1; the digit mapping is unverified)
+- a serial scoreboard output (default **off**; sends the Digi-Star EZ2000 frame at 1200 baud 7E1, baud selectable; format confirmed against a real EZ2000)
 - an ISOBUS Virtual Terminal client (default **off**; separate build, untested on hardware)
 
 Each output is switched on or off from the web page and takes effect after a restart.
@@ -20,7 +20,7 @@ See `DESIGN.md` for the hardware (parts, power, pins, signal budget, bring-up or
 | All other files | Syntax-checked on a host against stand-in ESP headers only |
 | ESP-IDF build (`s3`), Wi-Fi access point, web page, Wi-Fi firmware update | Builds, and runs on a **bare ESP32-S3 DevKit** (no ADS1220 or load cells attached). Tried through the web page only |
 | ADS1220 driver, readings, calibration, status LED colours, scoreboard UART, CAN | **Not tested on hardware** |
-| Digi-Star scoreboard protocol | **Unknown.** Waiting on Digi-Star |
+| Digi-Star scoreboard protocol | **Known.** Captured from a real EZ2000 (J904 pin 4, 7E1, `<stx>-16050<cr>` / `<stx>    50<cr>`); matches our frame. Not yet tried on the Agri-Tronix display |
 | ISOBUS VT | **Built, untested.** Five tabs (Home, Unloads, Fields, Calibrate, Setup); needs a VT simulator / real display, see `isobus/README.md` |
 
 Expect register-level and wiring issues the first time the ADS1220 and load cells are connected.

@@ -17,7 +17,7 @@ tested on hardware (see "Firmware" and README.md). Version, build and release wo
 
 ```
 12 V in (9-14.4 V) -> TVS + reverse protection -+-> OKI-78SR-5/1.5-W36-C (5 V) -> DevKit 5V pin; DevKit's onboard 3V3 -> ESP32-S3, ADS1220 DVDD, RS232 xcvr, CAN xcvr VIO;  5 V net also -> CAN xcvr VCC (up to ~70-80 mA)
-                                     +-> excitation pre-reg (~7 V, or 12 V direct) -> low-noise LDO 5 V (EXC, >=150 mA) -> bridge excitation + ADS1220 AVDD/REF
+                                     +-> 33 ohm / 4.7 uF RC -> ADP7142 low-noise LDO 5 V (EXC, 200 mA) -> bridge excitation + ADS1220 AVDD/REF
 
 Scoreboard display: its own separate, separately fused 12 V rail (J905 pin 5), not part of the tree above. Its ground is tied to this board's ground (needed for the RS-232 data signal).
 
@@ -33,10 +33,9 @@ ADS1220 --SPI + DRDY--> ESP32-S3 --UART--> RS232 (or RS485) xcvr --> scoreboard
 |---|---|---|
 | MCU | ESP32-S3-DevKitC-1 N16R8 (used as the final board, with its onboard 3.3 V regulator) | AgIsoStack++ docs target a classic ESP32 (denky32); S3 support is **unconfirmed** |
 | ADC | ADS1220 breakout board (20 x 22 mm, RC filtering on AVDD/DVDD) | 24-bit, PGA up to 128, AVDD as reference gives ratiometric reading. See "ADS1220 breakout" below |
-| Excitation | Low-noise 5 V LDO, >=150 mA | Five 350 ohm cells in parallel is ~70 ohm, so ~70 mA at 5 V. **Measure the real bridge resistance first** |
+| Excitation | ADP7142 low-noise 5 V LDO (200 mA, 40 V max input), fed from the protected 12 V through a 33 ohm / 4.7 uF RC | Five 350 ohm cells in parallel is ~70 ohm, so ~70 mA at 5 V. **Measure the real bridge resistance first.** No pre-regulator: see "Power rails" for LDO heat and the RC's voltage drop |
 | 12 V front end | Order: fuse -> reverse-polarity protection -> TVS -> bulk caps -> branches. Fuse: 1.5 A fast-acting, rated 32 V DC or more (automotive mini blade or SMD). TVS: SMBJ15A (SMCJ15A if more surge energy is wanted), unidirectional, after the reverse protection so a reversed battery cannot short through it. Reverse protection (chosen): Vishay SQD50P04-13L_T4GE3 P-FET (TO-252, -40 V, 13 mOhm, ISM/IDM -200 A, AEC-Q101). It is a 2-lead symbol: pin 1 = G, pin 2 = S, tab/pin 3 = D. Drain (tab) to the fused battery side, source to the protected 12 V rail. Gate: 47 kOhm to GND, plus a 12 V Zener (Vishay BZX84C12-E3-18, SOT-23) gate-to-source with cathode on the source/rail and anode on the gate node. Verify the Zener's SOT-23 pin mapping against its datasheet | Load on this rail is about 0.4 A (OKI branch about 0.3 A at 9 V, excitation about 0.07 A). Display is on its own rail. Check fuse I2t against the capacitor inrush (about 222 uF at the OKI input) and the OKI's 0.16 A2s inrush spec. TVS does not cover a full alternator load dump |
 | 5 V logic supply | Murata OKI-78SR-5/1.5-W36-C (5 V, 1.5 A, 7-36 V in, 90.5 %, -40 to 85 C) | Feeds the DevKit's 5V pin; the DevKit's onboard 3.3 V regulator supplies the ESP32 and the small 3.3 V loads (ADS1220 DVDD, MAX3232, TCAN1042HV VIO pin; the CAN transceiver's VCC is on the 5 V rail). No separate 3.3 V LDO on our board. Datasheet (5 V model): output 4.8-5.2 V (+/-3 % total band), ripple/noise 50 mVp-p typ / 75 max (20 MHz BW), fixed 500 kHz switching, max capacitive load 300 uF low-ESR, no minimum load, hiccup short-circuit protection. Do **not** use it as the excitation or reference source. 10-22 uF ceramic plus 0.1 uF at its output is fine. **No reverse-polarity protection; datasheet recommends a 2 A fast-blow external fuse.** At its input use 2 x 100 uF low-ESR (35 V or higher; ESR under 700 mohm at 100 kHz), matching the datasheet's reflected-ripple test (15 mA p-p), plus 22 uF and 0.1 uF ceramic at the pins. Check the fast-blow fuse's I2t against the capacitor inrush Keep it away from the ADC inputs |
-| Excitation pre-reg | ~7 V regulator, or feed the excitation LDO from the protected 12 V | The 5 V OKI cannot feed a 5 V LDO (no headroom). Direct 12 V costs about 0.5 W at ~70 mA, so check LDO thermals |
 | CAN | **TI TCAN1042HVDR** (SOIC-8, 2 Mbps CAN FD, "H" = **+/-70 V bus fault protection**, "V" = VIO level shifting). VCC 4.5-5.5 V from the 5 V rail, **VIO (pin 5) 3.0-5.5 V from the DevKit's 3V3**, 0.1 uF at each, 4.7 uF bulk near VCC. Pin 8 = STB with an **internal pull-up: a floating STB puts the chip in standby, so tie STB to GND (about 10 kohm)**. Not the HGV (5 Mbps not needed at 250 kbit/s). Replaces the TCAN332 (see CAN notes for why) | Absolute max on CANH/CANL is +/-70 V, receiver common-mode +/-30 V, 16 kV HBM, 15 kV IEC unpowered / 8 kV powered, 4 kV EFT; TXD dominant timeout; bus is high impedance when unpowered. Dominant supply current up to 70 mA (80 mA high load; 180 mA max in a bus-fault test), on the 5 V rail. TI marks the plain TCAN1042HD tube obsolete, use the HVDR tape-and-reel. No termination unless this node is at the end of the bus (see below). Still add a CAN TVS (see CAN notes). Datasheet SLLES7D |
 | RS232 | MAX3232EIDR (TI, SOIC-16, -40 to 85 C, ESD-protected) or MAX3232EE (ADI) / SP3232E | 0.1 uF charge-pump caps at 3.3 V, **1 uF VCC bypass**, 100 kohm pull-ups on DIN1/DIN2, series resistor plus clamp on DOUT1/DOUT2 (see "Scoreboard"). Swap for MAX3485/SP3485 if the scoreboard is RS485. Signal levels on the J905 are **not confirmed** (see "Scoreboard") |
 | Protection | ESD/TVS on load cell, scoreboard and CAN lines | Cables run outside the enclosure |
@@ -78,7 +77,7 @@ traces don't cross.
      - The OKI has no reverse-polarity protection and its datasheet recommends a 2 A fast-blow fuse. The shared
        input protection covers reverse polarity, and the 1.5 A fast-acting main fuse is under the OKI's 2 A
        limit, so no separate OKI fuse is needed now that the display is on its own rail. The 500 kHz switching ripple is attenuated about 54 dB
-       by the excitation path's 33 ohm / 4.7 uF RC plus the ADP7142's PSRR; the remaining risk is layout. The input range is 9-14.4 V, so the OKI's 7 V minimum has margin.
+       by the excitation path's 33 ohm / 4.7 uF RC alone, with the ADP7142's PSRR on top of that; the remaining risk is layout. The input range is 9-14.4 V, so the OKI's 7 V minimum has margin.
      - The DevKit's 3.3 V regulator is an AMS1117-3.3 (per the user; about 1 A, dropout about 1.1 V at
        800 mA, figures from memory). It covers the ESP32's Wi-Fi peaks (about 350-500 mA) plus the external 3.3 V
        loads (about 30 mA combined). At 5 V in it dissipates about 0.6 W at a 0.35 A peak (about 0.17 W at
@@ -88,9 +87,36 @@ traces don't cross.
        the OKI are never back-feeding each other.
      - Put local decoupling (and a ferrite or RC) on the ADS1220 DVDD tap, since the shared 3V3 rail carries
        Wi-Fi burst noise.
-  2. **Excitation:** a separate path, not the OKI. A ~7 V pre-regulator (or the protected 12 V directly)
-     -> ferrite + capacitor -> low-noise 5 V LDO (>= 150 mA, check PSRR at the pre-regulator's switching
-     frequency if it is a switcher).
+  2. **Excitation:** a separate path, not the OKI. The protected 12 V (after the P-FET) -> 33 ohm / 4.7 uF RC
+     -> ADP7142 low-noise 5 V LDO (200 mA). There is no pre-regulator, so the RC resistor and the LDO
+     drop the whole 12 V-to-5 V difference between them.
+     - **RC capacitor:** 4.7 uF X7R, 50 V, 1206/1210, plus 0.1 uF, both at the LDO input pin. 0.1 uF alone puts
+       the corner at about 48 kHz (only about 20 dB at the OKI's 500 kHz); 4.7 uF puts it near 1 kHz (about
+       54 dB). Use 50 V because the TVS lets spikes through near 24 V, and a 25 V part keeps much less of its
+       capacitance with 12 V across it.
+     - **LDO pins and package (ADP7142ARDZ-5.0, SOIC-8 with exposed pad, datasheet Rev. K):** pins 1 AND 2 are
+       VOUT, 3 SENSE/ADJ (to VOUT), 4 GND, 5 EN (to VIN, rated 44 V), 6 SS, 7 AND 8 are VIN. Exposed pad is GND
+       internally; connect it to the ground plane. Check in the PCB that pads 2, 7 and the exposed pad all
+       have nets.
+     - **LDO caps:** datasheet needs at least 2.2 uF on the output (ESR <= 0.3 ohm) and at least 1.5 uF effective
+       after DC bias, temperature and tolerance. A good 2.2 uF part passes, but use 4.7 uF X7R 16-25 V 0805/1206
+       for margin. The datasheet says to match input capacitance to output when the output is above 2.2 uF,
+       which the 4.7 uF input cap does (use 10 uF on both if going to 10 uF out).
+     - **Soft start:** SS open gives about 380 us to 90 %, which is close to the ADS1220's limit (supplies
+       slower than 1 V per 50 us). Fit 10 nF on SS to GND: t = 380 us + 0.6 V x Css / 1.15 uA, about 5.6 ms.
+       This also helps DVDD come up before AVDD. Never ground SS directly.
+     - **LDO heat (SOIC, datasheet Table 6):** at 14.4 V in (alternator running) and 70 mA, the LDO dissipates
+       about 0.5 W after the 33 ohm drop. theta-JA is 89 C/W with 500 mm^2 of copper, 78 C/W with 1000 mm^2,
+       63 C/W with 6400 mm^2, so the junction runs 32-45 C above ambient; the 125 C limit is reached at about
+       80 C ambient with 500 mm^2 and 86 C with 1000 mm^2. Aim for at least 1000 mm^2 of GND copper on the
+       exposed pad with thermal vias to an inner or bottom plane.
+     - **Input headroom:** the 33 ohm drops 33 x I. At the 9 V minimum input the LDO sees 9 - 33 x I and needs
+       5 V plus its dropout (a few hundred mV, check the datasheet). That caps excitation current at about
+       110 mA: 70 mA (five 350 ohm cells) leaves about 6.7 V, fine; 115 mA (eight) leaves about 5.2 V, at the
+       edge. For more cells, use 700/1000 ohm cells or a smaller resistor (less ripple filtering).
+     - **Heat:** the resistor takes 33 x I^2 and the LDO takes the rest. At 70 mA and 14.4 V in: resistor
+       about 0.16 W, LDO about (14.4 - 2.3 - 5) x 0.07 = 0.5 W. Use the LDO package with an exposed pad and
+       copper under it, a 0.25 W or larger resistor, and check temperature in a hot enclosure.
   (Scoreboard display: not on this input. It gets its own separate 12 V rail with its own fuse and TVS, sized
   for the display's current and voltage range once the manufacturer answers. Its ground must be common with
   this board's ground for the RS-232 signal.)
@@ -194,9 +220,9 @@ Serial settings (set on the indicator, so ours must match what the scoreboard ex
   - B (three characters) = digit or SPACE.
   - C = digit, SPACE, or a minus sign meaning a TR (tare/zero) command is active.
   - D = digit or a minus sign meaning motion is active.
-  - This is a single older indicator's manual. The indicator on the J905 may differ, and the exact mapping
-    of the six characters to the display's six digits (and what C and D show when the flags are inactive)
-    is not fully clear from the page. The text after item D, and any examples, are not yet seen.
+  - Read closely, the manual already fixes the mapping: B cannot be `-`, so a minus sign sits only in A (the
+    far left); D is always a character, so the weight is right-justified with leading spaces; C and D are
+    ordinary weight digits unless their flag is active. Confirmed by the capture below.
   - Serial: 7 data bits, even parity, 1 stop bit; 1200 baud standard, 9600 baud when SCOREM = 4. The ESP32
     UART supports 7E1 in hardware, so the parity bit needs no software handling.
 - EZ2000 wiring (J904, not the J905 on newer indicators): scoreboard RS-232 out = pin 4, ground = pin 7;
@@ -211,22 +237,25 @@ Serial settings (set on the indicator, so ours must match what the scoreboard ex
   [Arduino forum quoting the EZII manual](https://forum.arduino.cc/t/digi-star-scoreboard-read/566015),
   [EZ2000 technical manual](https://manualzz.com/doc/28493021/technical-manual-ez-2000---digi-star).
 
-Message layout:
-- No published byte-by-byte sheet. The display shows whatever weight string the indicator sends; the Digi-Star
-  selects that output with its **Scoreboard Mode** setting.
-- Fastest way to get the exact layout: put a serial terminal on pin 2 and ground of a working J905 and capture
-  the stream. The vendor can also request the full protocol sheet from the manufacturer.
+**Captured from a real EZ2000 (Nov 2026)** (non-V; it has the optional serial port, J904). The EZ2000 and EZ2000V
+share one manual and one scoreboard format. SCOREM = 4, USB-RS232 cable on J904, 3 minutes, 918 frames:
+- J904 **pin 4** = scoreboard output (data seen). Pin 2 idles at RS-232 mark (-8.4 V) too but sent nothing.
+  Both idle at **-8.4 V**, so the output is true RS-232 levels. Ground = pin 7.
+- **9600 baud, 7E1** (every one of 7344 bytes had correct even parity). SCOREM 4 = 9600; other modes 1200.
+- Every frame is exactly 8 bytes: `02` + 6 chars + `0D`. About 9 frames/s, repeated while the weight is steady.
+  Output pauses for 1-2 s while the indicator shows a message (key presses) or is in setup.
+- Examples: `<stx>-16050<cr>` (negative: `-` in A, 5 digits), `<stx>    50<cr>` (right-justified, spaces).
+  This indicator steps by 50 lb. One stray frame `-16318` appeared during a weight change.
+- Not seen: motion `-` in D (did not appear while the weight changed), TR `-` in C, a 6-digit positive weight.
+- The firmware's `scoreboard_format()` produces exactly these frames.
 
 Still unknown:
-- Signal levels on pin 2: **treated as RS-232 (decision).** The vendor reply does not state it, but the question
-  about RS-232 specs was asked in the email and the reply did not correct it. Older Digi-Star manuals also say
-  RS-232 (see above). Build with the MAX3232, TX channel only. Optional insurance: a jumper/0 ohm pad to bypass
-  the MAX3232 and feed the ESP32's 3.3 V UART TX straight to the display. If a working indicator ever becomes
-  available, confirm the idle level (about -9 V = RS232, about 0 V or 5 V = TTL).
-- How the six characters ABBBCD map to the six display digits, what C and D show when no flag is active, and
-  whether the J905 output matches the EZ2000 format. Plan: read the rest of that manual section for examples;
-  ask Agri-Tronix to request the protocol sheet from the manufacturer; otherwise probe the display directly
-  with candidate strings (baud 1200/9600, 7E1).
+- Whether the Agri-Tronix 2906-0409 (built for the newer J905 indicators) accepts the EZ2000 frame, and at which
+  baud (try 1200, then 9600). On the J905 the same data goes out on pin 2, which is where our board sends it.
+- Whether the display needs the motion flag; the EZ2000 capture never sent it. If the display misbehaves while
+  the weight moves, turn the flag off (`SB_SEND_MOTION_FLAG` in `scoreboard.cpp`).
+- Signal levels on the J905 pin 2: **treated as RS-232 (decision)**, now backed by the -8.4 V idle level on the
+  EZ2000. Build with the MAX3232, TX channel only.
 - Current draw on the +12 V pin (needed for fuse and supply sizing).
 
 Power: pin 5 carries +12 V to the scoreboard. Supply it from its own separate, separately fused 12 V rail
@@ -314,7 +343,8 @@ in settings; holding the BOOT button (GPIO0) while powering up forces it on for 
 **Scoreboard (`scoreboard.cpp`).** Off by default. UART1 at 1200 baud 7E1 (settings), one frame every 250 ms:
 `<stx>` + six characters + `<cr>`, the EZ2000 layout. The weight is sent right-justified in the six characters, a
 leading `-` marks a negative weight, and the last character becomes `-` while in motion. The tare flag is never
-sent. This mapping is an assumption: see "Scoreboard" for what is unconfirmed. UART2 is opened and left idle.
+sent. The layout matches a capture from a real EZ2000 (see "Scoreboard"); not yet tried on the Agri-Tronix display.
+UART2 is opened and left idle.
 RS-485 mode (DE on GPIO8) exists in firmware but is not part of the board design.
 
 **ISOBUS (`isobus_vt.cpp`).** Separate build (`pio run -e s3_isobus`), off by default, TWAI at 250 kbit/s accepting all
@@ -341,9 +371,8 @@ work again. The restart runs in its own 4 KB task (2 KB was too small and the sc
    the box connector (see "Excitation cable drop").
 2. Junction box output connector pinout (the label colour table on the cell is unreadable).
 3. That the junction box is passive (no amplifier or power requirement).
-4. Scoreboard (Digi-Star J905, 2906-0409): pinout, power pins and baud/framing are now known (see
-   "Scoreboard"). Still open: signal levels (RS232/RS485/TTL), current draw, and the weight string.
-   Capture the traffic on pin 2 of a working J905, or ask Digi-Star for the protocol sheet.
+4. Scoreboard (Digi-Star J905, 2906-0409): pinout, power pins, framing and the weight string are now known
+   (EZ2000 capture, see "Scoreboard"). Still open: that the display accepts it and at which baud, and current draw.
 5. Whether the ESP32-S3 works with AgIsoStack++'s TWAI plugin and your pool size.
 
 ## CAN / ISOBUS notes
@@ -380,8 +409,7 @@ work again. The restart runs in its own 4 KB task (2 KB was too small and the sc
 3. Add junction box and all five cells. Re-measure excitation current.
    Then connect the real Digi-Star cable and repeat the loop-resistance measurement (see "Excitation cable drop").
    Do the two-point span calibration (step 2) with the final cable installed, not on the bench.
-4. Scoreboard UART once the protocol is known. Do not connect the scoreboard until
-   its power pins are identified.
+4. Scoreboard UART: connect the display (J905 pinout, see "Scoreboard"), try 1200 baud, then 9600.
 5. CAN / VT: simulator first, then the real display.
 
 ## Safety and legal notes

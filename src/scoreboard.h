@@ -3,8 +3,7 @@
 // Serial output to a remote scoreboard display.
 //
 // scoreboard_format() builds the Digi-Star EZ2000 frame <stx>ABBBCD<cr> (7E1, 1200 baud default).
-// The mapping of the six characters to the display digits is UNVERIFIED (see scoreboard.cpp).
-// Confirm against a real indicator capture or by probing the display before relying on it.
+// The layout matches a capture from a real EZ2000 (see scoreboard.cpp and DESIGN.md "Scoreboard").
 
 #include <cstddef>
 #include "app.h"

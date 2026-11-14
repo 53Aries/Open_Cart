@@ -17,12 +17,10 @@ static const char* TAG = "scoreboard";
 //   A   = '-' (negative), SPACE or a digit      BBB = digit or SPACE
 //   C   = digit, SPACE, or '-' when a TR (tare/zero) command is active
 //   D   = digit, or '-' when motion is active
-// UNVERIFIED: the mapping of the six characters to the display's six digits and what C and D show
-// when their flags are inactive are not confirmed, and the J905 indicator may differ from the EZ2000.
-// Assumed here: the six characters are the weight, right-justified, left to right (A is the
-// most significant). A '-' in A marks a negative weight (then only 5 digits fit). The motion flag
-// replaces the last digit D with '-' (that digit is always 0 at the default 10 lb display step).
-// The TR flag is never sent. Capture a real indicator or probe the display to confirm.
+// Confirmed by capturing a real EZ2000 (SCOREM 4: 9600 baud 7E1, ~9 frames/s): the six characters are the
+// weight, right-justified with leading spaces, e.g. "<stx>    50<cr>"; a negative weight has '-' in A and
+// 5 digits, e.g. "<stx>-16050<cr>". The motion flag replaces the last digit D with '-' (per the manual; the
+// capture never showed it, so turn it off here if the display misbehaves). The TR flag is never sent.
 // ---------------------------------------------------------------------------
 static constexpr bool SB_SEND_MOTION_FLAG = true;
 
@@ -100,6 +98,6 @@ void scoreboard_start() {
         ESP_LOGE(TAG, "could not start the scoreboard task");
         return;
     }
-    ESP_LOGW(TAG, "scoreboard output running (EZ2000 frame, UNVERIFIED digit mapping) at %u baud, 7E1",
+    ESP_LOGW(TAG, "scoreboard output running (EZ2000 frame) at %u baud, 7E1",
              static_cast<unsigned>(s.sb_baud));
 }
