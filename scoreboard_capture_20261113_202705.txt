@@ -1,0 +1,35 @@
+# COM24 9600 baud, opened 8N1 (bit 7 = parity bit if the line is 7E1/7O1)
+# columns: time | hex | text (_ = space) | parity of every byte | repeat count
+    0.06s 82 a0 a0 a0 a0 35 30 8d                  <stx>____50<cr>          par=E
+          (previous frame repeated 1073 more times)
+  108.45s 82 a0 a0 a0 a0 a0 30 8d                  <stx>_____0<cr>          par=E
+  108.57s 82 2d a0 a0 35 35 30 8d                  <stx>-__550<cr>          par=E
+  108.70s 82 2d a0 a0 b7 35 30 8d                  <stx>-__750<cr>          par=E
+  108.76s 82 2d a0 a0 b7 30 30 8d                  <stx>-__700<cr>          par=E
+  108.88s 82 2d a0 a0 36 35 30 8d                  <stx>-__650<cr>          par=E
+          (previous frame repeated 1 more times)
+  109.05s 82 2d a0 a0 36 30 30 8d                  <stx>-__600<cr>          par=E
+  109.16s 82 2d a0 a0 35 35 30 8d                  <stx>-__550<cr>          par=E
+  109.29s 82 2d a0 a0 35 30 30 8d                  <stx>-__500<cr>          par=E
+  109.34s 82 2d a0 a0 b4 35 30 8d                  <stx>-__450<cr>          par=E
+  109.47s 82 2d a0 a0 b4 30 30 8d                  <stx>-__400<cr>          par=E
+  109.60s 82 2d a0 a0 33 35 30 8d                  <stx>-__350<cr>          par=E
+          (previous frame repeated 1 more times)
+  109.77s 82 2d a0 a0 33 30 30 8d                  <stx>-__300<cr>          par=E
+          (previous frame repeated 1 more times)
+  109.96s 82 2d a0 a0 b2 35 30 8d                  <stx>-__250<cr>          par=E
+          (previous frame repeated 1 more times)
+  110.15s 82 2d a0 a0 b2 30 30 8d                  <stx>-__200<cr>          par=E
+          (previous frame repeated 2 more times)
+  110.47s 82 2d a0 a0 b1 35 30 8d                  <stx>-__150<cr>          par=E
+          (previous frame repeated 2 more times)
+  110.77s 82 2d a0 a0 b1 30 30 8d                  <stx>-__100<cr>          par=E
+          (previous frame repeated 4 more times)
+  111.28s 82 2d a0 a0 a0 35 30 8d                  <stx>-___50<cr>          par=E
+          (previous frame repeated 8 more times)
+  112.17s 82 a0 a0 a0 a0 a0 30 8d                  <stx>_____0<cr>          par=E
+          (previous frame repeated 4 more times)
+  112.68s 82 2d a0 a0 a0 35 30 8d                  <stx>-___50<cr>          par=E
+  112.75s 82 a0 a0 a0 a0 a0 30 8d                  <stx>_____0<cr>          par=E
+          (previous frame repeated 25 more times)
+  115.36s 82 a0 a0 a0 a0 35 30 8d                  <stx>____50<cr>          par=E
